@@ -8,7 +8,6 @@
 extern "C" {
 #endif
 
-// C-friendly enums for memory protection and run status.
 typedef enum {
     NoAccess = 0,
     ReadOnly = 1,
@@ -31,25 +30,41 @@ typedef enum {
     UnhandledException = 9
 } RunStatus;
 
-// Opaque type representing the Icicle VM.
 typedef struct Icicle Icicle;
 typedef struct RawEnvironment RawEnvironment;
-// Forward-declare Cpu so we can refer to it.
-struct Cpu;
-typedef struct Cpu Cpu;
 
-// Retrieve the pointer to the CPU from the VM.
-Cpu* icicle_get_cpu_ptr(Icicle* ptr);
+// Hook Callback Types
+typedef int (*ViolationFunction)(void* data, uint64_t address, uint8_t permission, int unmapped);
+typedef void (*RawFunction)(void* data);
+typedef void (*PtrFunction)(void* data, uint64_t address);
 
-
-// Opaque structure for register information.
+// Syscall Arguments Structure (for x86_64 Linux convention)
 typedef struct {
-    char* name;   // allocated C string (free with icicle_reg_list_free)
+    uint64_t arg0; // RDI
+    uint64_t arg1; // RSI
+    uint64_t arg2; // RDX
+    uint64_t arg3; // R10
+    uint64_t arg4; // R8
+    uint64_t arg5; // R9
+} SyscallArgs;
+
+// Updated Syscall Hook Callback Type with Context
+// Return value semantics: 0=Continue after syscall, 1=Skip syscall, -1=Propagate Exception
+typedef int (*SyscallHookFunction)(void* data, uint64_t syscall_nr, const SyscallArgs* args);
+
+typedef struct Cpu Cpu;
+struct Cpu;
+
+typedef struct {
+    char* name;
     uint32_t offset;
     uint8_t size;
 } RegInfo;
 
-// FFI functions provided by the library.
+// New Memory Hook Callback Types
+typedef void (*MemReadHookFunction)(void* data, uint64_t address, uint8_t size, const uint8_t* value_read);
+typedef void (*MemWriteHookFunction)(void* data, uint64_t address, uint8_t size, uint64_t value_written);
+
 Icicle* icicle_new(const char *architecture,
                    int jit,
                    int jit_mem,
@@ -90,10 +105,40 @@ int icicle_run_until(Icicle* ptr, uint64_t address);
 RawEnvironment* icicle_rawenv_new();
 void icicle_rawenv_free(RawEnvironment* env);
 int icicle_rawenv_load(RawEnvironment* env, void* cpu, const unsigned char* code, size_t size);
+Cpu* icicle_get_cpu_ptr(Icicle* ptr);
+uint32_t icicle_add_violation_hook(Icicle* ptr, ViolationFunction callback, void* data);
+
+// Update add_syscall_hook to use the new callback type
+uint32_t icicle_add_syscall_hook(Icicle* ptr, SyscallHookFunction callback, void* data);
+uint32_t icicle_add_execution_hook(Icicle* ptr, PtrFunction callback, void* data);
+int icicle_remove_hook(Icicle* ptr, uint32_t id);
+
+// Add declarations for memory hooks
+// Note: Using u32 for hook IDs, although MMU might return Option<u32>
+// We will handle potential None in Rust and return 0 for failure.
+// We'll expose ReadAfter and Write hooks.
+uint32_t icicle_add_mem_read_hook(
+    Icicle* ptr, 
+    MemReadHookFunction callback, 
+    void* data, 
+    uint64_t start_addr, 
+    uint64_t end_addr);
+    
+uint32_t icicle_add_mem_write_hook(
+    Icicle* ptr, 
+    MemWriteHookFunction callback, 
+    void* data, 
+    uint64_t start_addr, 
+    uint64_t end_addr);
+
+// Declarations for removing hooks by type
+int icicle_remove_hook(Icicle* ptr, uint32_t hook_id); // ONLY for Violation (1) and Syscall (2)
+int icicle_remove_execution_hook(Icicle* ptr, uint32_t hook_id);
+int icicle_remove_mem_read_hook(Icicle* ptr, uint32_t hook_id);
+int icicle_remove_mem_write_hook(Icicle* ptr, uint32_t hook_id);
 
 #ifdef __cplusplus
 }
 #endif
 
 #endif // ICICLE_FFI_H
-

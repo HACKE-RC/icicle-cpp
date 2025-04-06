@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <ffi.h>
+#include <string.h>
 
 // Utility function for hex dumping memory.
 void hex_dump(const unsigned char *data, size_t size) {
@@ -427,6 +428,23 @@ void test_memory_operations() {
 
     icicle_free_buffer(read_buffer, out_size);
     icicle_free(vm);
+}
+
+// Callback function for violation hook testing.
+int my_violation_hook(void* data, uint64_t address, uint8_t permission, int unmapped) {
+    printf("Violation hook invoked: address=0x%lx, permission=%u, unmapped=%d\n", address, permission, unmapped);
+    // Return 1 to indicate the violation might be considered handled (behavior depends on core)
+    return 1;
+}
+
+// Example syscall hook: prints a message.
+void my_syscall_hook(void* data) {
+    printf("Syscall hook invoked.\n");
+}
+
+// Example execution hook: prints the execution address.
+void my_execution_hook(void* data, uint64_t address) {
+    printf("Execution hook invoked: address=0x%lx\n", address);
 }
 
 int main() {

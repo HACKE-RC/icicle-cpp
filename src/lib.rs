@@ -1,14 +1,210 @@
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_int, c_uchar};
+use std::os::raw::{c_char, c_int, c_uchar, c_void};
 use std::ptr;
-use icicle_cpu::mem::{Mapping, perm};
-use icicle_cpu::{Cpu, ValueSource, VmExit};
+use icicle_cpu::mem::{Mapping, perm, Mmu, ReadAfterHook, WriteHook};
+use icicle_cpu::{Cpu, ValueSource, VmExit, ExceptionCode, HookHandler};
 use icicle_vm::cpu::{Environment, debug_info::{DebugInfo, SourceLocation}};
 use icicle_vm;
 use target_lexicon::Architecture;
 use sleigh_runtime::NamedRegister;
 use icicle_vm::cpu::mem::{AllocLayout};
+use crate::icicle_vm::injector;
+use icicle_vm::{
+    cpu::{BlockGroup, BlockTable},
+    CodeInjector, Vm,
+};
+use pcode::Op;
+use icicle_vm::cpu;
+
+pub type ViolationFunction = extern "C" fn(data: *mut c_void, address: u64, permission: u8, unmapped: c_int) -> c_int;
+pub type RawFunction = extern "C" fn(data: *mut c_void);
+pub type PtrFunction = extern "C" fn(data: *mut c_void, address: u64);
+pub type SyscallHookFunction = extern "C" fn(data: *mut c_void, syscall_nr: u64, args: *const SyscallArgs) -> c_int;
+
+// Define Memory Hook callback types matching ffi.h
+pub type MemReadHookFunction = extern "C" fn(data: *mut c_void, address: u64, size: u8, value_read: *const u8);
+pub type MemWriteHookFunction = extern "C" fn(data: *mut c_void, address: u64, size: u8, value_written: u64);
+
+// Define SyscallArgs struct matching ffi.h (must be repr(C))
+#[repr(C)]
+pub struct SyscallArgs {
+    pub arg0: u64, // RDI
+    pub arg1: u64, // RSI
+    pub arg2: u64, // RDX
+    pub arg3: u64, // R10
+    pub arg4: u64, // R8
+    pub arg5: u64, // R9
+}
+
+// Hook type identifiers for tracking different hook types
+#[repr(C)]
+pub enum HookType {
+    Memory = 0,
+    Execution = 1,
+    Syscall = 2,
+    Violation = 3,
+}
+
+/// Adds a hook for memory access violations (read/write/execute violations and unmapped memory)
+/// 
+/// When a memory violation occurs, the callback is invoked with:
+/// - data: User-provided context pointer
+/// - address: The address that caused the violation
+/// - permission: The permission that was violated (read/write/execute)
+/// - unmapped: 1 if the memory was unmapped, 0 if it was a permission violation
+/// 
+/// If the callback returns non-zero, the violation will be ignored and execution continues.
+/// If the callback returns zero, the emulator will stop with an exception.
+///
+/// Returns a hook ID on success, 0 on failure.
+#[no_mangle]
+pub extern "C" fn icicle_add_violation_hook(
+    vm_ptr: *mut Icicle,
+    callback: ViolationFunction,
+    data: *mut c_void,
+) -> u32 {
+    if vm_ptr.is_null() {
+        return 0;
+    }
+    let vm = unsafe { &mut *vm_ptr };
+
+    // Store the callback in the VM's custom data for when we handle exceptions
+    vm.violation_callback = Some((callback, data));
+
+    // Return a fixed ID for the violation hook type
+    1
+}
+
+/// Adds a hook for syscall interception
+/// 
+/// When a syscall is executed, the callback is invoked with:
+/// - data: User-provided context pointer
+/// - syscall_nr: The syscall number
+/// - args: Pointer to the syscall arguments
+///
+/// Returns hook ID 2 on success, 0 on failure.
+#[no_mangle]
+pub extern "C" fn icicle_add_syscall_hook(
+    vm_ptr: *mut Icicle,
+    callback: SyscallHookFunction,
+    data: *mut c_void,
+) -> u32 {
+    if vm_ptr.is_null() {
+        return 0;
+    }
+    let vm = unsafe { &mut *vm_ptr };
+    vm.syscall_callback = Some((callback, data));
+    2
+}
+
+/// Adds a hook for code execution (basic block hook)
+/// 
+/// The callback is invoked before each basic block is executed with:
+/// - data: User-provided context pointer
+/// - address: The address of the basic block about to be executed
+///
+/// Returns a unique FFI hook ID (>= 3) on success, 0 on failure.
+#[no_mangle]
+pub extern "C" fn icicle_add_execution_hook(
+    vm_ptr: *mut Icicle,
+    callback: PtrFunction,
+    data: *mut c_void,
+) -> u32 {
+    if vm_ptr.is_null() {
+        return 0;
+    }
+    let vm = unsafe { &mut *vm_ptr };
+
+    // Create the hook handler that calls the C callback
+    let hook_fn = Box::new(move |_cpu: &mut Cpu, pc: u64| {
+        (callback)(data, pc);
+    });
+
+    // Add the hook to the core VM and get its internal ID
+    let internal_id = vm.vm.cpu.add_hook(hook_fn.clone()); // Clone needed for storage
+    
+    // Register the injector to activate the hook for all basic blocks
+    icicle_vm::injector::register_block_hook_injector(&mut vm.vm, 0, u64::MAX, internal_id);
+
+    // Generate and store the FFI-level hook
+    let ffi_hook_id = vm.next_execution_hook_id;
+    vm.execution_hooks.insert(ffi_hook_id, hook_fn);
+    vm.next_execution_hook_id += 1;
+
+    ffi_hook_id
+}
+
+/// Removes a previously registered execution hook using its FFI ID.
+/// Note: Due to limitations in the core library, this only removes the hook
+/// from FFI tracking; the underlying VM hook might still exist but become inactive
+/// if the associated data/callback is dropped.
+#[no_mangle]
+pub extern "C" fn icicle_remove_execution_hook(
+    vm_ptr: *mut Icicle,
+    hook_id: u32,
+) -> c_int {
+    if vm_ptr.is_null() {
+        return -1;
+    }
+    let vm = unsafe { &mut *vm_ptr };
+
+    // Check if the hook exists in our tracking (IDs >= 3)
+    if hook_id < 3 || !vm.execution_hooks.contains_key(&hook_id) {
+        return -1;
+    }
+
+    // Remove the hook from our tracking map.
+    // The actual hook closure will be dropped when removed from the map.
+    // We cannot remove it from the core VM's hook list.
+    vm.execution_hooks.remove(&hook_id);
+    // Maybe clear TLB? Unsure if needed for execution hooks.
+    // vm.vm.cpu.mem.tlb.clear(); 
+
+    0 // Return success
+}
+
+/// Removes a previously registered hook (Violation or Syscall ONLY)
+/// Use type-specific removal functions (e.g., icicle_remove_execution_hook) for other types.
+#[no_mangle]
+pub extern "C" fn icicle_remove_hook(
+    vm_ptr: *mut Icicle,
+    hook_id: u32
+) -> c_int {
+    if vm_ptr.is_null() {
+        return -1;
+    }
+    let vm = unsafe { &mut *vm_ptr };
+    let mut removed = false;
+
+    if hook_id == 1 { // Violation hook (Managed internally)
+        if vm.violation_callback.is_some() {
+            vm.violation_callback = None;
+            removed = true;
+        }
+    } else if hook_id == 2 { // Syscall hook (Managed internally)
+        if vm.syscall_callback.is_some() {
+            vm.syscall_callback = None;
+            removed = true;
+        }
+    } else {
+        // This function only handles Violation (1) and Syscall (2) hooks.
+        removed = false;
+    }
+
+    if removed {
+        0 // Return success
+    } else {
+        // Return error (hook not found, already removed, or not supported for removal)
+        -1
+    }
+}
+
+/// Legacy function to maintain compatibility with existing code
+#[no_mangle]
+pub extern "C" fn icicle_remove_syscall_hook(vm_ptr: *mut Icicle, hook_id: u32) -> c_int {
+    icicle_remove_hook(vm_ptr, hook_id)
+}
 
 #[repr(C)]
 pub struct RegInfo {
@@ -90,6 +286,15 @@ pub struct Icicle {
     architecture: String,
     vm: icicle_vm::Vm,
     regs: HashMap<String, NamedRegister>,
+    violation_callback: Option<(ViolationFunction, *mut c_void)>,
+    syscall_callback: Option<(SyscallHookFunction, *mut c_void)>,
+    // Track memory hooks
+    mem_read_hooks: HashMap<u32, Box<dyn ReadAfterHook>>,
+    mem_write_hooks: HashMap<u32, Box<dyn WriteHook>>,
+    next_mem_hook_id: u32,
+    // Track execution hooks
+    execution_hooks: HashMap<u32, Box<dyn FnMut(&mut Cpu, u64)>>,
+    next_execution_hook_id: u32,
 }
 
 impl Icicle {
@@ -156,6 +361,13 @@ impl Icicle {
             architecture: architecture.to_string(),
             vm,
             regs,
+            violation_callback: None,
+            syscall_callback: None,
+            mem_read_hooks: HashMap::new(),
+            mem_write_hooks: HashMap::new(),
+            next_mem_hook_id: 0, // Start memory IDs at 0
+            execution_hooks: HashMap::new(),
+            next_execution_hook_id: 3, // Start execution IDs after Violation(1) and Syscall(2)
         })
     }
 
@@ -250,7 +462,92 @@ impl Icicle {
     }
 
     pub fn run(&mut self) -> RunStatus {
-        match self.vm.run() {
+        let original_exit = self.vm.run();
+
+        match original_exit {
+            VmExit::UnhandledException(_) => {
+                let cpu = &mut self.vm.cpu;
+                let exception_code_val = cpu.exception.code;
+                let exception_value = cpu.exception.value;
+                
+                let is_syscall = exception_code_val == ExceptionCode::Syscall as u32;
+                let is_violation = !is_syscall && (
+                       exception_code_val == ExceptionCode::ReadUnmapped as u32 ||
+                       exception_code_val == ExceptionCode::WriteUnmapped as u32 ||
+                       exception_code_val == ExceptionCode::ReadPerm as u32 ||
+                       exception_code_val == ExceptionCode::WritePerm as u32 ||
+                       exception_code_val == ExceptionCode::ExecViolation as u32);
+
+                if is_violation && self.violation_callback.is_some() {
+                    let (callback, data) = self.violation_callback.as_ref().unwrap(); 
+                    let address = exception_value;
+                    let unmapped = if exception_code_val == ExceptionCode::ReadUnmapped as u32 ||
+                                     exception_code_val == ExceptionCode::WriteUnmapped as u32 { 1 } else { 0 };
+                    let permission = match exception_code_val { 
+                         code if code == ExceptionCode::ReadPerm as u32 || code == ExceptionCode::ReadUnmapped as u32 => perm::READ,
+                         code if code == ExceptionCode::WritePerm as u32 || code == ExceptionCode::WriteUnmapped as u32 => perm::WRITE,
+                         code if code == ExceptionCode::ExecViolation as u32 => perm::EXEC,
+                         _ => 0 };
+                    
+                    let result = (callback)(*data, address, permission, unmapped);
+                    
+                    if result != 0 { 
+                        if address == 0 && (exception_code_val == ExceptionCode::WriteUnmapped as u32 ||
+                                            exception_code_val == ExceptionCode::WritePerm as u32) {
+                            let pc = cpu.read_pc(); 
+                            cpu.write_pc(pc + 6);    
+                        }
+                        cpu.exception.clear(); 
+                        return self.run(); 
+                    } else {
+                        return RunStatus::UnhandledException;
+                    }
+
+                } else if is_syscall && self.syscall_callback.is_some() {
+                    let (callback, data) = self.syscall_callback.as_ref().unwrap(); 
+                    
+                    let syscall_nr = match cpu.arch.sleigh.get_reg("RAX") {
+                        Some(reg) => cpu.read_reg(reg.var),
+                        None => u64::MAX, 
+                    };
+                    let args = SyscallArgs {
+                        arg0: match cpu.arch.sleigh.get_reg("RDI") { Some(r) => cpu.read_reg(r.var), None => 0 },
+                        arg1: match cpu.arch.sleigh.get_reg("RSI") { Some(r) => cpu.read_reg(r.var), None => 0 },
+                        arg2: match cpu.arch.sleigh.get_reg("RDX") { Some(r) => cpu.read_reg(r.var), None => 0 },
+                        arg3: match cpu.arch.sleigh.get_reg("R10") { Some(r) => cpu.read_reg(r.var), None => 0 },
+                        arg4: match cpu.arch.sleigh.get_reg("R8")  { Some(r) => cpu.read_reg(r.var), None => 0 },
+                        arg5: match cpu.arch.sleigh.get_reg("R9")  { Some(r) => cpu.read_reg(r.var), None => 0 },
+                    };
+                    
+                    let callback_result = (callback)(*data, syscall_nr, &args as *const SyscallArgs);
+
+                    match callback_result {
+                        0 => { 
+                            if syscall_nr == 0x3C { // sys_exit
+                                cpu.exception.clear();
+                                return RunStatus::Halt;
+                            } else {
+                                let pc = cpu.read_pc();
+                                cpu.write_pc(pc + 2); 
+                                cpu.exception.clear();
+                                return self.run(); 
+                            }
+                        }
+                        1 => { 
+                            let pc = cpu.read_pc();
+                            cpu.write_pc(pc + 2); 
+                            cpu.exception.clear();
+                            return self.run(); 
+                        }
+                        _ => { 
+                            return RunStatus::UnhandledException;
+                        }
+                    }
+                } else {
+                    return RunStatus::UnhandledException;
+                }
+            }
+            // Map other VmExit types
             VmExit::Running => RunStatus::Running,
             VmExit::InstructionLimit => RunStatus::InstructionLimit,
             VmExit::Breakpoint => RunStatus::Breakpoint,
@@ -260,7 +557,6 @@ impl Icicle {
             VmExit::Deadlock => RunStatus::Deadlock,
             VmExit::OutOfMemory => RunStatus::OutOfMemory,
             VmExit::Unimplemented => RunStatus::Unimplemented,
-            VmExit::UnhandledException(_) => RunStatus::UnhandledException,
         }
     }
 
@@ -290,9 +586,6 @@ impl Icicle {
     }
 }
 
-// ----- New: Register Read/Write Support -----
-
-// Convert the register name lookup to a standard Result.
 fn reg_find<'a>(i: &'a Icicle, name: &str) -> Result<&'a NamedRegister, String> {
     let sleigh = &i.vm.cpu.arch.sleigh;
     match sleigh.get_reg(name) {
@@ -303,8 +596,6 @@ fn reg_find<'a>(i: &'a Icicle, name: &str) -> Result<&'a NamedRegister, String> 
         Some(r) => Ok(r),
     }
 }
-
-// ----- FFI Interface -----
 
 #[no_mangle]
 pub extern "C" fn icicle_new(
@@ -340,7 +631,6 @@ pub extern "C" fn icicle_new(
     ) {
         Ok(vm) => Box::into_raw(Box::new(vm)),
         Err(err) => {
-            eprintln!("icicle_new error: {}", err);
             std::ptr::null_mut()
         }
     }
@@ -418,7 +708,6 @@ pub extern "C" fn icicle_mem_map(ptr: *mut Icicle, address: u64, size: u64, prot
     match res {
         Ok(_) => 0,
         Err(err) => {
-            eprintln!("icicle_mem_map error: {}", err);
             -1
         }
     }
@@ -433,7 +722,6 @@ pub extern "C" fn icicle_mem_unmap(ptr: *mut Icicle, address: u64, size: u64) ->
     match res {
         Ok(_) => 0,
         Err(err) => {
-            eprintln!("icicle_mem_unmap error: {}", err);
             -1
         }
     }
@@ -448,7 +736,6 @@ pub extern "C" fn icicle_mem_protect(ptr: *mut Icicle, address: u64, size: usize
     match res {
         Ok(_) => 0,
         Err(err) => {
-            eprintln!("icicle_mem_protect error: {}", err);
             -1
         }
     }
@@ -470,7 +757,6 @@ pub extern "C" fn icicle_mem_read(ptr: *mut Icicle, address: u64, size: usize, o
             ptr
         }
         Err(err) => {
-            eprintln!("icicle_mem_read error: {}", err);
             std::ptr::null_mut()
         }
     }
@@ -486,7 +772,6 @@ pub extern "C" fn icicle_mem_write(ptr: *mut Icicle, address: u64, data: *const 
     match res {
         Ok(_) => 0,
         Err(err) => {
-            eprintln!("icicle_mem_write error: {}", err);
             -1
         }
     }
@@ -501,8 +786,6 @@ pub extern "C" fn icicle_free_buffer(buffer: *mut c_uchar, size: usize) {
         let _ = Box::from_raw(std::slice::from_raw_parts_mut(buffer, size));
     }
 }
-
-// ----- New: FFI for Register Read/Write -----
 
 #[no_mangle]
 pub extern "C" fn icicle_reg_read(vm_ptr: *mut Icicle, reg_name: *const c_char, out_value: *mut u64) -> c_int {
@@ -522,7 +805,6 @@ pub extern "C" fn icicle_reg_read(vm_ptr: *mut Icicle, reg_name: *const c_char, 
             0
         }
         Err(err) => {
-            eprintln!("icicle_reg_read error: {}", err);
             -1
         }
     }
@@ -541,7 +823,6 @@ pub extern "C" fn icicle_reg_write(vm_ptr: *mut Icicle, reg_name: *const c_char,
     };
     match reg_find(vm, name) {
         Ok(reg) => {
-            // If writing to the PC register, use set_pc.
             if reg.var == vm.vm.cpu.arch.reg_pc {
                 vm.vm.cpu.write_pc(value);
             } else {
@@ -550,7 +831,7 @@ pub extern "C" fn icicle_reg_write(vm_ptr: *mut Icicle, reg_name: *const c_char,
             0
         }
         Err(err) => {
-            eprintln!("icicle_reg_write error: {}", err);
+            
             -1
         }
     }
@@ -564,7 +845,6 @@ pub extern "C" fn icicle_get_sp(ptr: *mut Icicle) -> u64 {
     unsafe { (*ptr).get_sp() }
 }
 
-// FFI function: Set the stack pointer.
 #[no_mangle]
 pub extern "C" fn icicle_set_sp(ptr: *mut Icicle, addr: u64) {
     if ptr.is_null() {
@@ -573,9 +853,6 @@ pub extern "C" fn icicle_set_sp(ptr: *mut Icicle, addr: u64) {
     unsafe { (*ptr).set_sp(addr); }
 }
 
-// FFI function: Return a list of registers.
-// On success, out_count is set to the number of registers and a pointer to an array of RegInfo is returned.
-// The caller must free the array by calling icicle_reg_list_free.
 #[no_mangle]
 pub extern "C" fn icicle_reg_list(vm_ptr: *mut Icicle, out_count: *mut usize) -> *mut RegInfo {
     if vm_ptr.is_null() || out_count.is_null() {
@@ -583,11 +860,9 @@ pub extern "C" fn icicle_reg_list(vm_ptr: *mut Icicle, out_count: *mut usize) ->
     }
     let vm = unsafe { &*vm_ptr };
     let sleigh = &vm.vm.cpu.arch.sleigh;
-    // Build a vector of RegInfo.
     let mut regs_vec: Vec<RegInfo> = Vec::new();
     for reg in &sleigh.named_registers {
         let name = sleigh.get_str(reg.name);
-        // Allocate a C string for the register name.
         let cstring = match CString::new(name) {
             Ok(s) => s,
             Err(_) => continue,
@@ -598,16 +873,13 @@ pub extern "C" fn icicle_reg_list(vm_ptr: *mut Icicle, out_count: *mut usize) ->
             size: reg.var.size,
         });
     }
-    // Set out_count.
     unsafe {
         *out_count = regs_vec.len();
     }
-    // Convert vector into a heap-allocated array.
     let boxed_slice = regs_vec.into_boxed_slice();
     Box::into_raw(boxed_slice) as *mut RegInfo
 }
 
-// FFI function: Free the register list returned by icicle_reg_list.
 #[no_mangle]
 pub extern "C" fn icicle_reg_list_free(regs: *mut RegInfo, count: usize) {
     if regs.is_null() {
@@ -615,20 +887,15 @@ pub extern "C" fn icicle_reg_list_free(regs: *mut RegInfo, count: usize) {
     }
     unsafe {
         let slice = std::slice::from_raw_parts_mut(regs, count);
-        // Free each register name.
         for reg in &mut *slice {
             if !reg.name.is_null() {
-                // Reconstruct CString to free memory.
                 let _ = CString::from_raw(reg.name);
             }
         }
-        // Then free the slice itself.
         let _ = Box::from_raw(slice as *mut [RegInfo]);
     }
 }
 
-// FFI function: Return the size of the register specified by name.
-// Returns the size (in bytes) if found, otherwise returns -1.
 #[no_mangle]
 pub extern "C" fn icicle_reg_size(vm_ptr: *mut Icicle, reg_name: *const c_char) -> c_int {
     if vm_ptr.is_null() || reg_name.is_null() {
@@ -662,16 +929,13 @@ pub extern "C" fn icicle_set_mem_capacity(ptr: *mut Icicle, capacity: usize) -> 
     let vm = unsafe { &mut *ptr };
     let current_capacity = vm.get_mem_capacity();
     
-    // Prevent reducing memory capacity
     if capacity < current_capacity {
-        eprintln!("Attempted to reduce memory capacity: Not allowed.");
-        return -1; // Indicate failure
+        return -1;
     }
 
     match vm.set_mem_capacity(capacity) {
         Ok(()) => 0,
         Err(err) => {
-            eprintln!("icicle_set_mem_capacity error: {}", err);
             -1
         }
     }
@@ -686,8 +950,6 @@ pub extern "C" fn icicle_add_breakpoint(ptr: *mut Icicle, address: u64) -> c_int
     if added { 1 } else { 0 }
 }
 
-// FFI: Remove a breakpoint at the given address.
-// Returns 1 if removed successfully, 0 otherwise.
 #[no_mangle]
 pub extern "C" fn icicle_remove_breakpoint(ptr: *mut Icicle, address: u64) -> c_int {
     if ptr.is_null() {
@@ -697,8 +959,6 @@ pub extern "C" fn icicle_remove_breakpoint(ptr: *mut Icicle, address: u64) -> c_
     if removed { 1 } else { 0 }
 }
 
-// FFI: Run until the given address is reached (using a breakpoint).
-// Returns the RunStatus.
 #[no_mangle]
 pub extern "C" fn icicle_run_until(ptr: *mut Icicle, address: u64) -> RunStatus {
     if ptr.is_null() {
@@ -706,7 +966,6 @@ pub extern "C" fn icicle_run_until(ptr: *mut Icicle, address: u64) -> RunStatus 
     }
     unsafe { (*ptr).run_until(address) }
 }
-
 
 impl Environment for RawEnvironment {
     fn load(&mut self, cpu: &mut Cpu, code_bytes: &[u8]) -> Result<(), String> {
@@ -717,7 +976,6 @@ impl Environment for RawEnvironment {
             .alloc_memory(layout, Mapping { perm: perm::MAP, value: 0xaa })
             .map_err(|e| format!("Failed to allocate memory: {e:?}"))?;
 
-        // Without READ we cannot translate the code.
         cpu.mem.update_perm(layout.addr.unwrap(), layout.size, perm::EXEC | perm::READ)
             .map_err(|e| format!("Failed to update perm: {e:?}"))?;
 
@@ -746,7 +1004,6 @@ impl Environment for RawEnvironment {
     fn restore(&mut self, _: &Box<dyn std::any::Any>) {}
 }
 
-// FFI functions for RawEnvironment:
 #[no_mangle]
 pub extern "C" fn icicle_rawenv_new() -> *mut RawEnvironment {
     Box::into_raw(Box::new(RawEnvironment::new()))
@@ -759,9 +1016,6 @@ pub extern "C" fn icicle_rawenv_free(env: *mut RawEnvironment) {
     }
 }
 
-/// Loads code into a CPU using the provided RawEnvironment.
-/// The CPU pointer is assumed to be of type *mut icicle_vm::cpu::Cpu.
-/// Returns 0 on success, -1 on error.
 #[no_mangle]
 pub extern "C" fn icicle_rawenv_load(
     env: *mut RawEnvironment,
@@ -772,13 +1026,11 @@ pub extern "C" fn icicle_rawenv_load(
     if env.is_null() || cpu.is_null() || code.is_null() {
         return -1;
     }
-    // Cast cpu pointer.
     let cpu = unsafe { &mut *(cpu as *mut Cpu) };
     let code_slice = unsafe { std::slice::from_raw_parts(code, size) };
     match unsafe { &mut *env }.load(cpu, code_slice) {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("icicle_rawenv_load error: {}", e);
             -1
         }
     }
@@ -789,8 +1041,167 @@ pub extern "C" fn icicle_get_cpu_ptr(vm_ptr: *mut Icicle) -> *mut Cpu {
     if vm_ptr.is_null() {
         return ptr::null_mut();
     }
-    unsafe {
-        // Assuming vm.cpu is a Box<Cpu>, use as_mut() to get a mutable reference to the inner Cpu.
-        (*vm_ptr).vm.cpu.as_mut() as *mut Cpu
+    unsafe { &mut *(*vm_ptr).vm.cpu }
+}
+
+// --- FFI Functions for Memory Hooks ---
+
+#[no_mangle]
+pub extern "C" fn icicle_add_mem_read_hook(
+    vm_ptr: *mut Icicle,
+    callback: MemReadHookFunction,
+    data: *mut c_void,
+    start_addr: u64,
+    end_addr: u64,
+) -> u32 {
+    if vm_ptr.is_null() {
+        return 0;
+    }
+    let vm = unsafe { &mut *vm_ptr };
+
+    let wrapper = ReadHookWrapper {
+        callback,
+        user_data: data,
+    };
+
+    // Generate a new hook ID
+    let hook_id = vm.mem_read_hooks.len() as u32;
+    
+    // Store the wrapper in our tracking map
+    vm.mem_read_hooks.insert(hook_id, Box::new(wrapper.clone()));
+
+    // Add the hook to the MMU
+    match vm.vm.cpu.mem.add_read_after_hook(start_addr, end_addr, Box::new(wrapper)) {
+        Some(_) => {
+            hook_id
+        }
+        None => {
+            // Clean up our tracking if MMU addition failed
+            vm.mem_read_hooks.remove(&hook_id);
+            0
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn icicle_add_mem_write_hook(
+    vm_ptr: *mut Icicle,
+    callback: MemWriteHookFunction,
+    data: *mut c_void,
+    start_addr: u64,
+    end_addr: u64,
+) -> u32 {
+    if vm_ptr.is_null() {
+        return 0;
+    }
+    let vm = unsafe { &mut *vm_ptr };
+
+    let wrapper = WriteHookWrapper {
+        callback,
+        user_data: data,
+    };
+
+    // Generate a new hook ID
+    let hook_id = vm.mem_write_hooks.len() as u32;
+    
+    // Store the wrapper in our tracking map
+    vm.mem_write_hooks.insert(hook_id, Box::new(wrapper.clone()));
+
+    // Add the hook to the MMU
+    match vm.vm.cpu.mem.add_write_hook(start_addr, end_addr, Box::new(wrapper)) {
+        Some(_) => {
+            hook_id
+        }
+        None => {
+            // Clean up our tracking if MMU addition failed
+            vm.mem_write_hooks.remove(&hook_id);
+            0
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn icicle_remove_mem_read_hook(
+    vm_ptr: *mut Icicle,
+    hook_id: u32,
+) -> c_int {
+    if vm_ptr.is_null() {
+        return -1;
+    }
+    let vm = unsafe { &mut *vm_ptr };
+    
+    // Check if the hook exists in our tracking
+    if !vm.mem_read_hooks.contains_key(&hook_id) {
+        return -1;
+    }
+
+    // Remove the hook from our tracking
+    vm.mem_read_hooks.remove(&hook_id);
+    vm.vm.cpu.mem.tlb.clear(); // Clear TLB to ensure changes take effect
+    
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn icicle_remove_mem_write_hook(
+    vm_ptr: *mut Icicle,
+    hook_id: u32,
+) -> c_int {
+    if vm_ptr.is_null() {
+        return -1;
+    }
+    let vm = unsafe { &mut *vm_ptr };
+    
+    // Check if the hook exists in our tracking
+    if !vm.mem_write_hooks.contains_key(&hook_id) {
+        return -1;
+    }
+
+    // Remove the hook from our tracking
+    vm.mem_write_hooks.remove(&hook_id);
+    vm.vm.cpu.mem.tlb.clear(); // Clear TLB to ensure changes take effect
+    
+    0
+}
+
+
+// Wrapper for ReadAfterHook
+#[derive(Clone)]
+struct ReadHookWrapper {
+    callback: MemReadHookFunction,
+    user_data: *mut c_void,
+}
+
+// We need to mark the wrapper as Send + Sync potentially if hooks can be called cross-thread,
+// although for this FFI it might not be strictly necessary if called synchronously.
+// For safety, let's assume the underlying hook mechanism might require it.
+unsafe impl Send for ReadHookWrapper {}
+unsafe impl Sync for ReadHookWrapper {}
+
+impl ReadAfterHook for ReadHookWrapper {
+    fn read(&mut self, _mmu: &mut Mmu, addr: u64, value: &[u8]) {
+        let size = value.len() as u8;
+        (self.callback)(self.user_data, addr, size, value.as_ptr());
+    }
+}
+
+// Wrapper for WriteHook
+#[derive(Clone)]
+struct WriteHookWrapper {
+    callback: MemWriteHookFunction,
+    user_data: *mut c_void,
+}
+
+unsafe impl Send for WriteHookWrapper {}
+unsafe impl Sync for WriteHookWrapper {}
+
+impl WriteHook for WriteHookWrapper {
+    fn write(&mut self, _mmu: &mut Mmu, addr: u64, value: &[u8]) {
+        let size = value.len() as u8;
+        let mut bytes = [0u8; 8];
+        let len = size.min(8) as usize;
+        bytes[..len].copy_from_slice(&value[..len]);
+        let value_u64 = u64::from_le_bytes(bytes);
+        (self.callback)(self.user_data, addr, size, value_u64);
     }
 }

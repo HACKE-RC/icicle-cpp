@@ -12,24 +12,32 @@ endif
 
 tests:
 	cc tests.c $(HEADER_ARG) $(ICICLE_ARGS_DEBUG) $(CC_ARGS) -o tests-debug 
+	cc hook_tests.c $(HEADER_ARG) $(ICICLE_ARGS_DEBUG) $(CC_ARGS) -o hook-tests-debug 
 
 tests-release:
 	cc tests.c $(HEADER_ARG) $(ICICLE_ARGS_RELEASE) $(CC_ARGS) -o tests-release
+	cc hook_tests.c $(HEADER_ARG) $(ICICLE_ARGS_RELEASE) $(CC_ARGS) -o hook-tests-release
 
 all: tests tests-release
 
 run: tests
 	./tests-debug
+	./hook-tests-debug
 
 run-release: tests-release
 	./tests-release
+	./hook-tests-release
 
 run-all: tests tests-release
 	./tests-debug
+	./hook-tests-debug
 	echo "Ran debug mode binary. Now running release mode binary..."
 	./tests-release
+	./hook-tests-release
 	echo "Executed both."
 
 clean:
 	$(RM) ./tests-debug
+	$(RM) ./hook-tests-debug
 	$(RM) ./tests-release
+	$(RM) ./hook-tests-release
