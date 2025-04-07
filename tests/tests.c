@@ -18,7 +18,7 @@ void test_register_utilities() {
     printf("\n=== Testing Register Utilities ===\n");
     
     // Create an x86_64 VM.
-    Icicle *vm = icicle_new("x86_64", 1, 1, 0, 1, 0, 1, 0, 0);
+    Icicle* vm = icicle_new("x86_64", false, false, false, false, false, false, false, false);
     if (!vm) {
         printf("Failed to create x86_64 VM\n");
         return;

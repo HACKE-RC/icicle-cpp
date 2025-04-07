@@ -65,6 +65,36 @@ typedef struct {
 typedef void (*MemReadHookFunction)(void* data, uint64_t address, uint8_t size, const uint8_t* value_read);
 typedef void (*MemWriteHookFunction)(void* data, uint64_t address, uint8_t size, uint64_t value_written);
 
+// CPU Snapshot structure
+typedef struct {
+    void* regs;  // Opaque pointer to Regs
+    __uint128_t args[8];  // Using compiler-specific 128-bit type
+    void* shadow_stack;  // Opaque pointer to ShadowStack
+    uint32_t exception_code;
+    uint64_t exception_value;
+    void* pending_exception;  // Optional<Exception>
+    uint64_t icount;
+    uint64_t block_id;
+    uint64_t block_offset;
+} CpuSnapshot;
+
+// Full VM snapshot structure
+typedef struct {
+    CpuSnapshot* cpu;
+    void* mem;  // Opaque pointer to memory snapshot
+    void* env;  // Opaque pointer to environment snapshot
+} VmSnapshot;
+
+// Snapshot and restore functions
+CpuSnapshot* icicle_cpu_snapshot(Icicle* vm);
+int icicle_cpu_restore(Icicle* vm, const CpuSnapshot* snapshot);
+void icicle_cpu_snapshot_free(CpuSnapshot* snapshot);
+
+// Full VM snapshot functions
+VmSnapshot* icicle_vm_snapshot(Icicle* vm);
+int icicle_vm_restore(Icicle* vm, const VmSnapshot* snapshot);
+void icicle_vm_snapshot_free(VmSnapshot* snapshot);
+
 Icicle* icicle_new(const char *architecture,
                    int jit,
                    int jit_mem,
