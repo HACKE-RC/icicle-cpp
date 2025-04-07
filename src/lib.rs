@@ -3,7 +3,7 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_uchar, c_void};
 use std::ptr;
 use icicle_cpu::mem::{Mapping, perm, Mmu, ReadAfterHook, WriteHook};
-use icicle_cpu::{Cpu, ValueSource, VmExit, ExceptionCode, HookHandler};
+use icicle_cpu::{Cpu, ValueSource, VmExit, ExceptionCode, HookHandler, Regs, ShadowStack, Exception};
 use icicle_vm::cpu::{Environment, debug_info::{DebugInfo, SourceLocation}};
 use icicle_vm;
 use target_lexicon::Architecture;
@@ -1203,5 +1203,145 @@ impl WriteHook for WriteHookWrapper {
         bytes[..len].copy_from_slice(&value[..len]);
         let value_u64 = u64::from_le_bytes(bytes);
         (self.callback)(self.user_data, addr, size, value_u64);
+    }
+}
+
+#[repr(C)]
+pub struct CpuSnapshot {
+    regs: *mut Regs,
+    args: [u128; 8],
+    shadow_stack: *mut ShadowStack,
+    exception_code: u32,
+    exception_value: u64,
+    pending_exception: *mut Option<Exception>,
+    icount: u64,
+    block_id: u64,
+    block_offset: u64,
+}
+
+#[no_mangle]
+pub extern "C" fn icicle_cpu_snapshot(vm: *mut Icicle) -> *mut CpuSnapshot {
+    if vm.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    let vm = unsafe { &*vm };
+    let snapshot = vm.vm.cpu.snapshot();
+    
+    // Convert the snapshot into a C-compatible format
+    let c_snapshot = Box::new(CpuSnapshot {
+        regs: Box::into_raw(Box::new((*snapshot).regs.clone())),
+        args: (*snapshot).args,
+        shadow_stack: Box::into_raw(Box::new((*snapshot).shadow_stack.clone())),
+        exception_code: (*snapshot).exception.code,
+        exception_value: (*snapshot).exception.value,
+        pending_exception: Box::into_raw(Box::new((*snapshot).pending_exception.clone())),
+        icount: (*snapshot).icount,
+        block_id: (*snapshot).block_id,
+        block_offset: (*snapshot).block_offset,
+    });
+
+    Box::into_raw(c_snapshot)
+}
+
+#[no_mangle]
+pub extern "C" fn icicle_cpu_restore(vm: *mut Icicle, snapshot: *const CpuSnapshot) -> i32 {
+    if vm.is_null() || snapshot.is_null() {
+        return -1;
+    }
+
+    let vm = unsafe { &mut *vm };
+    let snapshot = unsafe { &*snapshot };
+
+    // Create a new CPU snapshot with the correct types
+    let rust_snapshot = Box::new(icicle_cpu::CpuSnapshot {
+        regs: unsafe { (*snapshot.regs).clone() },
+        args: snapshot.args,
+        shadow_stack: unsafe { (*snapshot.shadow_stack).clone() },
+        exception: Exception {
+            code: snapshot.exception_code,
+            value: snapshot.exception_value,
+        },
+        pending_exception: unsafe { (*snapshot.pending_exception).clone() },
+        icount: snapshot.icount,
+        block_id: snapshot.block_id,
+        block_offset: snapshot.block_offset,
+    });
+
+    vm.vm.cpu.restore(&*rust_snapshot);
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn icicle_cpu_snapshot_free(snapshot: *mut CpuSnapshot) {
+    if !snapshot.is_null() {
+        unsafe {
+            let snapshot = Box::from_raw(snapshot);
+            Box::from_raw(snapshot.regs);
+            Box::from_raw(snapshot.shadow_stack);
+            Box::from_raw(snapshot.pending_exception);
+        }
+    }
+}
+
+#[repr(C)]
+pub struct VmSnapshot {
+    cpu: *mut CpuSnapshot,
+    mem: *mut icicle_vm::Snapshot,
+    env: *mut Box<dyn std::any::Any>,
+}
+
+#[no_mangle]
+pub extern "C" fn icicle_vm_snapshot(vm: *mut Icicle) -> *mut VmSnapshot {
+    if vm.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    let vm = unsafe { &mut *vm };
+    let snapshot = vm.vm.snapshot();
+
+    // Convert the snapshot into a C-compatible format
+    let c_snapshot = Box::new(VmSnapshot {
+        cpu: Box::into_raw(Box::new(CpuSnapshot {
+            regs: Box::into_raw(Box::new((*snapshot.cpu).regs.clone())),
+            args: (*snapshot.cpu).args,
+            shadow_stack: Box::into_raw(Box::new((*snapshot.cpu).shadow_stack.clone())),
+            exception_code: (*snapshot.cpu).exception.code,
+            exception_value: (*snapshot.cpu).exception.value,
+            pending_exception: Box::into_raw(Box::new((*snapshot.cpu).pending_exception.clone())),
+            icount: (*snapshot.cpu).icount,
+            block_id: (*snapshot.cpu).block_id,
+            block_offset: (*snapshot.cpu).block_offset,
+        })),
+        mem: Box::into_raw(Box::new(snapshot)),
+        env: Box::into_raw(Box::new(Box::new(()))), // Empty environment for now
+    });
+
+    Box::into_raw(c_snapshot)
+}
+
+#[no_mangle]
+pub extern "C" fn icicle_vm_restore(vm: *mut Icicle, snapshot: *const VmSnapshot) -> i32 {
+    if vm.is_null() || snapshot.is_null() {
+        return -1;
+    }
+
+    let vm = unsafe { &mut *vm };
+    let snapshot = unsafe { &*snapshot };
+    let snapshot = unsafe { &*snapshot.mem };
+
+    vm.vm.restore(snapshot);
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn icicle_vm_snapshot_free(snapshot: *mut VmSnapshot) {
+    if !snapshot.is_null() {
+        unsafe {
+            let snapshot = Box::from_raw(snapshot);
+            icicle_cpu_snapshot_free(snapshot.cpu);
+            Box::from_raw(snapshot.mem);
+            Box::from_raw(snapshot.env);
+        }
     }
 }
