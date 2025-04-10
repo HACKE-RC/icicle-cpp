@@ -174,7 +174,7 @@ size_t icicle_get_mem_capacity(Icicle* ptr);
 int icicle_set_mem_capacity(Icicle* ptr, size_t capacity);
 bool icicle_add_breakpoint(Icicle* ptr, uint64_t address);
 bool icicle_remove_breakpoint(Icicle* ptr, uint64_t address);
-int icicle_run_until(Icicle* ptr, uint64_t address);
+RunStatus icicle_run_until(Icicle* ptr, uint64_t address);
 RawEnvironment* icicle_rawenv_new();
 void icicle_rawenv_free(RawEnvironment* env);
 int icicle_rawenv_load(RawEnvironment* env, void* cpu, const unsigned char* code, size_t size);
@@ -205,7 +205,6 @@ uint32_t icicle_add_mem_write_hook(
     uint64_t end_addr);
 
 // Declarations for removing hooks by type
-int icicle_remove_hook(Icicle* ptr, uint32_t hook_id); // ONLY for Violation (1) and Syscall (2)
 int icicle_remove_execution_hook(Icicle* ptr, uint32_t hook_id);
 int icicle_remove_mem_read_hook(Icicle* ptr, uint32_t hook_id);
 int icicle_remove_mem_write_hook(Icicle* ptr, uint32_t hook_id);
