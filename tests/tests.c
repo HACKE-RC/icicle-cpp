@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
-#include <ffi.h>
+#include <icicle.h>
 #include <string.h>
 
 // Utility function for hex dumping memory.
@@ -76,7 +76,17 @@ void test_register_utilities() {
     } else {
         printf("Failed to write register 'rax'\n");
     }
-    
+    IcicleExceptionCode exception = icicle_get_exception_code(vm);
+    // compare the exception code with halt, limit and syscall
+    if (exception == Exception_Halt) {
+        printf("Halt after register write\n");
+    } else if (exception == Exception_InstructionLimit) {
+        printf("Instruction limit after register write\n");
+    } else if (exception == Exception_Syscall) {
+        printf("Syscall after register write\n");
+    } else {
+        printf("No exception after register write\n");
+    }
     icicle_free(vm);
 }
 

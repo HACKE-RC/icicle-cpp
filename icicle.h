@@ -30,9 +30,48 @@ typedef enum {
     UnhandledException = 9
 } RunStatus;
 
+// Exception codes that can be returned by icicle_get_exception_code
+typedef enum {
+    Exception_NoException = 0,
+    Exception_InstructionLimit = 1,
+    Exception_Halt = 2,
+    Exception_Sleep = 3,
+    Exception_Syscall = 4,
+    Exception_CpuStateChanged = 5,
+    Exception_DivisionException = 6,
+    Exception_ReadUnmapped = 7,
+    Exception_ReadPerm = 8,
+    Exception_ReadUnaligned = 9,
+    Exception_ReadWatch = 10,
+    Exception_ReadUninitialized = 11,
+    Exception_WriteUnmapped = 12,
+    Exception_WritePerm = 13,
+    Exception_WriteWatch = 14,
+    Exception_WriteUnaligned = 15,
+    Exception_ExecViolation = 16,
+    Exception_SelfModifyingCode = 17,
+    Exception_OutOfMemory = 18,
+    Exception_AddressOverflow = 19,
+    Exception_InvalidInstruction = 20,
+    Exception_UnknownInterrupt = 21,
+    Exception_UnknownCpuID = 22,
+    Exception_InvalidOpSize = 23,
+    Exception_InvalidFloatSize = 24,
+    Exception_CodeNotTranslated = 25,
+    Exception_ShadowStackOverflow = 26,
+    Exception_ShadowStackInvalid = 27,
+    Exception_InvalidTarget = 28,
+    Exception_UnimplementedOp = 29,
+    Exception_ExternalAddr = 30,
+    Exception_Environment = 31,
+    Exception_JitError = 32,
+    Exception_InternalError = 33,
+    Exception_UnmappedRegister = 34,
+    Exception_UnknownError = 35
+} IcicleExceptionCode;
+
 typedef struct Icicle Icicle;
 typedef struct RawEnvironment RawEnvironment;
-
 // Hook Callback Types
 typedef int (*ViolationFunction)(void* data, uint64_t address, uint8_t permission, int unmapped);
 typedef void (*RawFunction)(void* data);
@@ -118,6 +157,10 @@ int icicle_mem_protect(Icicle* ptr, uint64_t address, size_t size, MemoryProtect
 unsigned char* icicle_mem_read(Icicle* ptr, uint64_t address, size_t size, size_t* out_size);
 int icicle_mem_write(Icicle* ptr, uint64_t address, const unsigned char* data, size_t size);
 void icicle_free_buffer(unsigned char* buffer, size_t size);
+
+// Get the current exception code from the VM's CPU
+// Returns NoException if there is no active exception
+IcicleExceptionCode icicle_get_exception_code(const Icicle* ptr);
 
 // Utility functions.
 uint64_t icicle_get_sp(Icicle* ptr);

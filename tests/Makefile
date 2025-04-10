@@ -1,5 +1,5 @@
 HEADER_ARG = -I../
-ICICLE_ARGS_DEBUG = -L../src/target/debug -l:libicicle.a
+ICICLE_ARGS_DEBUG = -L../src/target/debug -l:libicicle.a -lkeystone
 ICICLE_ARGS_RELEASE = -L../src/target/release -l:libicicle.a
 CC_ARGS = -lm
 OS := $(shell uname 2>/dev/null || echo Windows)
@@ -11,9 +11,10 @@ else
 endif
 
 tests:
-	cc tests.c $(HEADER_ARG) $(ICICLE_ARGS_DEBUG) $(CC_ARGS) -o tests-debug 
-	cc hook_tests.c $(HEADER_ARG) $(ICICLE_ARGS_DEBUG) $(CC_ARGS) -o hook-tests-debug 
-	cc snapshot_tests.c $(HEADER_ARG) $(ICICLE_ARGS_DEBUG) $(CC_ARGS) -o snapshot-tests-debug 
+	cc tests.c $(HEADER_ARG) $(ICICLE_ARGS_DEBUG) $(CC_ARGS) -o tests-debug
+	cc hook_tests.c $(HEADER_ARG) $(ICICLE_ARGS_DEBUG) $(CC_ARGS) -o hook-tests-debug
+	cc snapshot_tests.c $(HEADER_ARG) $(ICICLE_ARGS_DEBUG) $(CC_ARGS) -o snapshot-tests-debug
+	g++ archs.cpp $(HEADER_ARG) $(ICICLE_ARGS_DEBUG) $(CC_ARGS) -o archs-tests-debug
 
 tests-release:
 	cc tests.c $(HEADER_ARG) $(ICICLE_ARGS_RELEASE) $(CC_ARGS) -o tests-release

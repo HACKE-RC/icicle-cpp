@@ -831,7 +831,6 @@ pub extern "C" fn icicle_reg_write(vm_ptr: *mut Icicle, reg_name: *const c_char,
             0
         }
         Err(err) => {
-            
             -1
         }
     }
@@ -965,6 +964,17 @@ pub extern "C" fn icicle_run_until(ptr: *mut Icicle, address: u64) -> RunStatus 
         return RunStatus::UnhandledException;
     }
     unsafe { (*ptr).run_until(address) }
+}
+
+#[no_mangle]
+pub extern "C" fn icicle_get_exception_code(ptr: *const Icicle) -> u32 {
+    if ptr.is_null() {
+        return 0;
+    }
+    let vm = unsafe { &*ptr };
+    
+    // Get the exception code from the CPU
+    vm.vm.cpu.exception.code
 }
 
 impl Environment for RawEnvironment {

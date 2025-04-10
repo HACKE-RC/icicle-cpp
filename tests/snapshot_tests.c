@@ -3,7 +3,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/mman.h>
-#include "ffi.h"
+#include "icicle.h"
 
 // Test program that writes some test values to registers and memory
 void write_test_values(Icicle* vm) {
@@ -17,7 +17,7 @@ void write_test_values(Icicle* vm) {
     icicle_reg_write(vm, "rax", 0x1234567890ABCDEF);
     icicle_reg_write(vm, "rbx", 0xFEDCBA0987654321);
     icicle_reg_write(vm, "rcx", 0xDEADBEEFCAFEBABE);
-    
+
     // Write some test values to memory
     uint8_t test_data[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE};
     icicle_mem_write(vm, 0x1000, test_data, sizeof(test_data));

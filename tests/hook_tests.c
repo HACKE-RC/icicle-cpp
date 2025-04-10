@@ -3,9 +3,8 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdbool.h>
-
 // Include the Icicle API header - adjust path as needed
-#include "ffi.h"
+#include "icicle.h"
 
 // Counter for tracking hook invocations
 static int execution_hook_count = 0;
