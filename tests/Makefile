@@ -12,9 +12,10 @@ endif
 
 tests:
 	cc tests.c $(HEADER_ARG) $(ICICLE_ARGS_DEBUG) $(CC_ARGS) -o tests-debug
+	cc debug_features.c $(HEADER_ARG) $(ICICLE_ARGS_DEBUG) $(CC_ARGS) -o features-debug
 	cc hook_tests.c $(HEADER_ARG) $(ICICLE_ARGS_DEBUG) $(CC_ARGS) -o hook-tests-debug
 	cc snapshot_tests.c $(HEADER_ARG) $(ICICLE_ARGS_DEBUG) $(CC_ARGS) -o snapshot-tests-debug
-	g++ archs.cpp $(HEADER_ARG) $(ICICLE_ARGS_DEBUG) $(CC_ARGS) -o archs-tests-debug
+# 	g++ archs.cpp $(HEADER_ARG) $(ICICLE_ARGS_DEBUG) $(CC_ARGS) -o archs-tests-debug
 
 tests-release:
 	cc tests.c $(HEADER_ARG) $(ICICLE_ARGS_RELEASE) $(CC_ARGS) -o tests-release

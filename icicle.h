@@ -17,6 +17,14 @@ typedef enum {
     ExecuteReadWrite = 5
 } MemoryProtection;
 
+// Coverage modes for instrumentation
+typedef enum {
+    CoverageMode_Blocks = 0,      // Store a bit whenever a block is hit
+    CoverageMode_Edges = 1,       // Store a bit whenever an edge is hit
+    CoverageMode_BlockCounts = 2, // Increment a counter whenever a block is hit
+    CoverageMode_EdgeCounts = 3   // Increment a counter whenever an edge is hit
+} CoverageMode;
+
 typedef enum {
     Running = 0,
     InstructionLimit = 1,
@@ -103,6 +111,10 @@ typedef struct {
 // New Memory Hook Callback Types
 typedef void (*MemReadHookFunction)(void* data, uint64_t address, uint8_t size, const uint8_t* value_read);
 typedef void (*MemWriteHookFunction)(void* data, uint64_t address, uint8_t size, uint64_t value_written);
+
+// New debug instrumentation types
+typedef void (*LogWriteHookFunction)(void* data, const char* name, uint64_t address, uint8_t size, uint64_t value);
+typedef void (*LogRegsHookFunction)(void* data, const char* name, uint64_t address, size_t num_regs, const char** reg_names, const uint64_t* reg_values);
 
 // CPU Snapshot structure
 typedef struct {
@@ -208,6 +220,55 @@ uint32_t icicle_add_mem_write_hook(
 int icicle_remove_execution_hook(Icicle* ptr, uint32_t hook_id);
 int icicle_remove_mem_read_hook(Icicle* ptr, uint32_t hook_id);
 int icicle_remove_mem_write_hook(Icicle* ptr, uint32_t hook_id);
+
+// Generates a backtrace of function calls using debug information
+// Returns a newly allocated C string that must be freed with icicle_free_string
+// Returns NULL on failure or if no debug info is available
+char* icicle_get_backtrace(Icicle* ptr, size_t max_frames);
+
+// Generates a disassembly dump of all code in the VM
+// Returns a newly allocated C string that must be freed with icicle_free_string
+// Returns NULL on failure
+char* icicle_dump_disasm(const Icicle* ptr);
+
+// Returns the disassembly of the current code being executed
+// Returns a newly allocated C string that must be freed with icicle_free_string
+// Returns NULL on failure
+char* icicle_current_disasm(const Icicle* ptr);
+
+// Steps backward in execution by the specified number of instructions
+// Returns a RunStatus value on success, UINT32_MAX (equivalent to -1 as u32) on failure
+// Note: Requires a previous snapshot to be taken with icicle_vm_snapshot
+uint32_t icicle_step_back(Icicle* ptr, uint64_t count);
+
+// Goes to a specific instruction count
+// Returns a RunStatus value on success, UINT32_MAX (equivalent to -1 as u32) on failure
+// Note: Can only go to instruction counts that are available in snapshots
+uint32_t icicle_goto_icount(Icicle* ptr, uint64_t target_icount);
+
+// Frees a string previously returned by a string-returning function
+void icicle_free_string(char* string);
+
+// Declarations for debug instrumentation
+uint32_t icicle_debug_log_write(Icicle* ptr, const char* name, uint64_t address, uint8_t size, LogWriteHookFunction callback, void* data);
+uint32_t icicle_debug_log_regs(Icicle* ptr, const char* name, uint64_t address, size_t num_regs, const char** reg_names, LogRegsHookFunction callback, void* data);
+int icicle_add_debug_instrumentation(Icicle* ptr);
+
+// Coverage and instrumentation functions
+uint8_t* icicle_get_coverage_map(Icicle* ptr, size_t* out_size);
+int icicle_set_coverage_mode(Icicle* ptr, CoverageMode mode);
+CoverageMode icicle_get_coverage_mode(Icicle* ptr);
+int icicle_enable_instrumentation(Icicle* ptr, uint64_t start_addr, uint64_t end_addr);
+int icicle_set_context_bits(Icicle* ptr, uint8_t bits);
+uint8_t icicle_get_context_bits(Icicle* ptr);
+int icicle_enable_compcov(Icicle* ptr, uint8_t level);
+uint8_t icicle_get_compcov_level(Icicle* ptr);
+int icicle_enable_edge_coverage(Icicle* ptr, bool enable);
+bool icicle_has_edge_coverage(Icicle* ptr);
+int icicle_enable_block_coverage(Icicle* ptr, bool only_blocks);
+bool icicle_has_block_coverage(Icicle* ptr);
+bool icicle_has_counts_coverage(Icicle* ptr);
+void icicle_reset_coverage(Icicle* ptr);
 
 #ifdef __cplusplus
 }

@@ -26,6 +26,10 @@ pub type SyscallHookFunction = extern "C" fn(data: *mut c_void, syscall_nr: u64,
 pub type MemReadHookFunction = extern "C" fn(data: *mut c_void, address: u64, size: u8, value_read: *const u8);
 pub type MemWriteHookFunction = extern "C" fn(data: *mut c_void, address: u64, size: u8, value_written: u64);
 
+// Define debug instrumentation callback types
+pub type LogWriteHookFunction = extern "C" fn(data: *mut c_void, name: *const c_char, address: u64, size: u8, value: u64);
+pub type LogRegsHookFunction = extern "C" fn(data: *mut c_void, name: *const c_char, address: u64, num_regs: usize, reg_names: *const *const c_char, reg_values: *const u64);
+
 // Define SyscallArgs struct matching ffi.h (must be repr(C))
 #[repr(C)]
 pub struct SyscallArgs {
@@ -44,6 +48,16 @@ pub enum HookType {
     Execution = 1,
     Syscall = 2,
     Violation = 3,
+}
+
+// Coverage modes for instrumentation (matching the icicle_fuzzing::CoverageMode enum)
+#[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum CoverageMode {
+    Blocks = 0,      // Store a bit whenever a block is hit
+    Edges = 1,       // Store a bit whenever an edge is hit
+    BlockCounts = 2, // Increment a counter whenever a block is hit
+    EdgeCounts = 3,  // Increment a counter whenever an edge is hit
 }
 
 /// Adds a hook for memory access violations (read/write/execute violations and unmapped memory)
@@ -295,6 +309,15 @@ pub struct Icicle {
     // Track execution hooks
     execution_hooks: HashMap<u32, Box<dyn FnMut(&mut Cpu, u64)>>,
     next_execution_hook_id: u32,
+    // Coverage instrumentation
+    coverage_mode: CoverageMode,
+    coverage_start_addr: u64,
+    coverage_end_addr: u64,
+    context_bits: u8,
+    compcov_level: u8,
+    instrumentation_enabled: bool,
+    coverage_map: Vec<u8>,
+    coverage_hook_id: Option<u32>,
 }
 
 impl Icicle {
@@ -368,6 +391,14 @@ impl Icicle {
             next_mem_hook_id: 0, // Start memory IDs at 0
             execution_hooks: HashMap::new(),
             next_execution_hook_id: 3, // Start execution IDs after Violation(1) and Syscall(2)
+            coverage_mode: CoverageMode::Blocks,
+            coverage_start_addr: 0,
+            coverage_end_addr: 0,
+            context_bits: 0,
+            compcov_level: 0,
+            instrumentation_enabled: true,
+            coverage_map: vec![0; 4096],
+            coverage_hook_id: None,
         })
     }
 
@@ -583,6 +614,61 @@ impl Icicle {
 
     pub fn remove_breakpoint(&mut self, address: u64) -> bool {
         self.vm.remove_breakpoint(address)
+    }
+
+    pub fn get_backtrace(&mut self, max_frames: usize) -> String {
+        icicle_vm::debug::backtrace_with_limit(&mut self.vm, max_frames)
+    }
+
+    pub fn dump_disasm(&self) -> Result<String, String> {
+        icicle_vm::debug::dump_disasm(&self.vm)
+            .map_err(|e| format!("Failed to dump disassembly: {}", e))
+    }
+
+    pub fn current_disasm(&self) -> String {
+        icicle_vm::debug::current_disasm(&self.vm)
+    }
+
+    /// Steps backward in execution by the specified number of instructions.
+    /// Returns None if there are no snapshots to step back to.
+    pub fn step_back(&mut self, count: u64) -> Option<RunStatus> {
+        // Map VmExit to RunStatus if step_back succeeds
+        self.vm.step_back(count).map(|exit| match exit {
+            VmExit::Running => RunStatus::Running,
+            VmExit::InstructionLimit => RunStatus::InstructionLimit,
+            VmExit::Breakpoint => RunStatus::Breakpoint,
+            VmExit::Interrupted => RunStatus::Interrupted,
+            VmExit::Halt => RunStatus::Halt,
+            VmExit::Killed => RunStatus::Killed,
+            VmExit::Deadlock => RunStatus::Deadlock,
+            VmExit::OutOfMemory => RunStatus::OutOfMemory,
+            VmExit::Unimplemented => RunStatus::Unimplemented,
+            VmExit::UnhandledException(_) => RunStatus::UnhandledException,
+        })
+    }
+
+    /// Goes to a specific instruction count if snapshots are available.
+    /// Returns None if there are no snapshots that can reach the specified instruction count.
+    pub fn goto_icount(&mut self, target_icount: u64) -> Option<RunStatus> {
+        // Map VmExit to RunStatus if goto_icount succeeds
+        self.vm.goto_icount(target_icount).map(|exit| match exit {
+            VmExit::Running => RunStatus::Running,
+            VmExit::InstructionLimit => RunStatus::InstructionLimit,
+            VmExit::Breakpoint => RunStatus::Breakpoint,
+            VmExit::Interrupted => RunStatus::Interrupted,
+            VmExit::Halt => RunStatus::Halt,
+            VmExit::Killed => RunStatus::Killed,
+            VmExit::Deadlock => RunStatus::Deadlock,
+            VmExit::OutOfMemory => RunStatus::OutOfMemory,
+            VmExit::Unimplemented => RunStatus::Unimplemented,
+            VmExit::UnhandledException(_) => RunStatus::UnhandledException,
+        })
+    }
+
+    /// Saves a snapshot at the current execution state.
+    /// Snapshots are required for step_back and goto_icount functionality.
+    pub fn save_snapshot(&mut self) {
+        self.vm.save_snapshot();
     }
 }
 
@@ -1355,3 +1441,1002 @@ pub extern "C" fn icicle_vm_snapshot_free(snapshot: *mut VmSnapshot) {
         }
     }
 }
+
+// Generates a backtrace of function calls using debug information.
+// Returns a newly allocated C string that must be freed with icicle_free_string.
+// Returns NULL on failure or if no debug info is available.
+#[no_mangle]
+pub extern "C" fn icicle_get_backtrace(vm_ptr: *mut Icicle, max_frames: usize) -> *mut c_char {
+    if vm_ptr.is_null() {
+        return ptr::null_mut();
+    }
+    
+    let vm = unsafe { &mut *vm_ptr };
+    let backtrace_str = vm.get_backtrace(max_frames);
+    
+    // Convert Rust string to C string
+    match CString::new(backtrace_str) {
+        Ok(c_str) => c_str.into_raw(),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+// Helper to free strings allocated by string-returning functions like icicle_get_backtrace
+#[no_mangle]
+pub extern "C" fn icicle_free_string(string: *mut c_char) {
+    if !string.is_null() {
+        unsafe {
+            let _ = CString::from_raw(string);
+        }
+    }
+}
+
+// Generates a disassembly dump of all code in the VM
+// Returns a newly allocated C string that must be freed with icicle_free_string
+// Returns NULL on failure
+#[no_mangle]
+pub extern "C" fn icicle_dump_disasm(vm_ptr: *const Icicle) -> *mut c_char {
+    if vm_ptr.is_null() {
+        return ptr::null_mut();
+    }
+    
+    let vm = unsafe { &*vm_ptr };
+    match vm.dump_disasm() {
+        Ok(disasm_str) => match CString::new(disasm_str) {
+            Ok(c_str) => c_str.into_raw(),
+            Err(_) => ptr::null_mut(),
+        },
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+// Returns the disassembly of the current code being executed
+// Returns a newly allocated C string that must be freed with icicle_free_string
+// Returns NULL on failure
+#[no_mangle]
+pub extern "C" fn icicle_current_disasm(vm_ptr: *const Icicle) -> *mut c_char {
+    if vm_ptr.is_null() {
+        return ptr::null_mut();
+    }
+    
+    let vm = unsafe { &*vm_ptr };
+    let disasm_str = vm.current_disasm();
+    
+    match CString::new(disasm_str) {
+        Ok(c_str) => c_str.into_raw(),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+// Steps backward in execution by the specified number of instructions.
+// Returns the run status if successful, or -1 (as u32) if there are no snapshots to step back to.
+#[no_mangle]
+pub extern "C" fn icicle_step_back(vm_ptr: *mut Icicle, count: u64) -> u32 {
+    if vm_ptr.is_null() {
+        return u32::MAX; // Return -1 as u32
+    }
+    
+    let vm = unsafe { &mut *vm_ptr };
+    match vm.step_back(count) {
+        Some(status) => status as u32,
+        None => u32::MAX, // Return -1 as u32
+    }
+}
+
+// Goes to a specific instruction count if snapshots are available.
+// Returns the run status if successful, or -1 (as u32) if there are no snapshots that can reach the target.
+#[no_mangle]
+pub extern "C" fn icicle_goto_icount(vm_ptr: *mut Icicle, target_icount: u64) -> u32 {
+    if vm_ptr.is_null() {
+        return u32::MAX; // Return -1 as u32
+    }
+    
+    let vm = unsafe { &mut *vm_ptr };
+    match vm.goto_icount(target_icount) {
+        Some(status) => status as u32,
+        None => u32::MAX, // Return -1 as u32
+    }
+}
+
+// Saves a snapshot at the current execution state.
+// Snapshots are required for step_back and goto_icount functionality.
+#[no_mangle]
+pub extern "C" fn icicle_save_snapshot(vm_ptr: *mut Icicle) -> c_int {
+    if vm_ptr.is_null() {
+        return -1;
+    }
+    
+    let vm = unsafe { &mut *vm_ptr };
+    vm.save_snapshot();
+    0 // Return success
+}
+
+// Log write hook wrapper for memory write logging with a label
+struct LabeledWriteHook {
+    name: CString,
+    callback: LogWriteHookFunction,
+    user_data: *mut c_void,
+}
+
+impl Clone for LabeledWriteHook {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            callback: self.callback,
+            user_data: self.user_data,
+        }
+    }
+}
+
+impl WriteHook for LabeledWriteHook {
+    fn write(&mut self, _mmu: &mut Mmu, addr: u64, value: &[u8]) {
+        let val = if value.len() <= 8 {
+            // Convert bytes to u64 (assumes little-endian)
+            let mut val: u64 = 0;
+            for (i, &byte) in value.iter().enumerate() {
+                val |= (byte as u64) << (i * 8);
+            }
+            val
+        } else {
+            // For larger writes, we can only show part of the data
+            let mut val: u64 = 0;
+            for i in 0..8 {
+                if i < value.len() {
+                    val |= (value[i] as u64) << (i * 8);
+                }
+            }
+            val
+        };
+
+        (self.callback)(self.user_data, self.name.as_ptr(), addr, value.len() as u8, val);
+    }
+}
+
+// Structure to hold register hook data
+struct RegisterHook {
+    name: CString,
+    callback: LogRegsHookFunction,
+    user_data: *mut c_void,
+    reg_names: Vec<CString>,
+}
+
+impl Clone for RegisterHook {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            callback: self.callback,
+            user_data: self.user_data,
+            reg_names: self.reg_names.clone(),
+        }
+    }
+}
+
+/// Adds instrumentation to log memory writes at a specific address with a label
+/// 
+/// When a write occurs to the monitored address, the callback is invoked with:
+/// - data: User-provided context pointer
+/// - name: The label assigned to this memory location
+/// - address: The memory address that was written to
+/// - size: Size of the write in bytes
+/// - value: The value written (up to 64 bits)
+///
+/// Returns a unique hook ID on success, 0 on failure.
+#[no_mangle]
+pub extern "C" fn icicle_debug_log_write(
+    vm_ptr: *mut Icicle,
+    name: *const c_char,
+    address: u64,
+    size: u8,
+    callback: LogWriteHookFunction,
+    data: *mut c_void,
+) -> u32 {
+    if vm_ptr.is_null() || name.is_null() {
+        return 0;
+    }
+    let vm = unsafe { &mut *vm_ptr };
+    
+    // Convert C string to Rust
+    let c_str = unsafe { CStr::from_ptr(name) };
+    let name_str = match c_str.to_str() {
+        Ok(s) => s,
+        Err(_) => return 0, // Invalid UTF-8 string
+    };
+    
+    // Create wrapper with label
+    let hook = LabeledWriteHook {
+        name: CString::new(name_str).unwrap_or_else(|_| CString::new("unknown").unwrap()),
+        callback,
+        user_data: data,
+    };
+    
+    // Generate a new hook ID
+    let hook_id = vm.next_mem_hook_id;
+    vm.next_mem_hook_id += 1;
+    
+    // Add the hook to the MMU
+    let end_addr = address + size as u64;
+    match vm.vm.cpu.mem.add_write_hook(address, end_addr, Box::new(hook.clone())) {
+        Some(_) => {
+            // Store the hook in our tracking map for future reference/removal
+            vm.mem_write_hooks.insert(hook_id, Box::new(hook));
+            hook_id
+        }
+        None => 0 // Failed to add hook
+    }
+}
+
+/// Adds instrumentation to log register values at a specific program counter address
+/// 
+/// When execution reaches the specified address, the callback is invoked with:
+/// - data: User-provided context pointer
+/// - name: The label assigned to this checkpoint
+/// - address: The address where execution triggered the hook
+/// - num_regs: Number of registers being reported
+/// - reg_names: Array of register name strings
+/// - reg_values: Array of register values
+///
+/// Returns a unique hook ID on success, 0 on failure.
+#[no_mangle]
+pub extern "C" fn icicle_debug_log_regs(
+    vm_ptr: *mut Icicle,
+    name: *const c_char,
+    address: u64,
+    num_regs: usize,
+    reg_names: *const *const c_char,
+    callback: LogRegsHookFunction,
+    data: *mut c_void,
+) -> u32 {
+    if vm_ptr.is_null() || name.is_null() || reg_names.is_null() || num_regs == 0 {
+        return 0;
+    }
+    
+    let vm = unsafe { &mut *vm_ptr };
+    
+    // Convert C string to Rust
+    let c_str = unsafe { CStr::from_ptr(name) };
+    let name_str = match c_str.to_str() {
+        Ok(s) => s,
+        Err(_) => return 0, // Invalid UTF-8 string
+    };
+    
+    // Convert register names
+    let mut rust_reg_names = Vec::with_capacity(num_regs);
+    for i in 0..num_regs {
+        let reg_name_ptr = unsafe { *reg_names.add(i) };
+        if reg_name_ptr.is_null() {
+            continue;
+        }
+        
+        let reg_c_str = unsafe { CStr::from_ptr(reg_name_ptr) };
+        match reg_c_str.to_str() {
+            Ok(s) => {
+                // Verify this register exists
+                if reg_find(vm, s).is_err() {
+                    continue; // Skip invalid registers
+                }
+                match CString::new(s) {
+                    Ok(cs) => rust_reg_names.push(cs),
+                    Err(_) => continue,
+                }
+            }
+            Err(_) => continue,
+        }
+    }
+    
+    if rust_reg_names.is_empty() {
+        return 0; // No valid registers found
+    }
+    
+    // Create the register hook structure
+    let reg_hook = RegisterHook {
+        name: CString::new(name_str).unwrap_or_else(|_| CString::new("unknown").unwrap()),
+        callback,
+        user_data: data,
+        reg_names: rust_reg_names.clone(),
+    };
+    
+    // Create closure for VM hook
+    let hook_fn = move |cpu: &mut Cpu, addr: u64| {
+        // Create arrays for the callback
+        let mut c_reg_names: Vec<*const c_char> = Vec::with_capacity(rust_reg_names.len());
+        let mut reg_values: Vec<u64> = Vec::with_capacity(rust_reg_names.len());
+        
+        // Collect register values
+        for reg_name in &rust_reg_names {
+            let var = match cpu.arch.sleigh.get_reg(reg_name.to_str().unwrap_or("")) {
+                Some(reg) => reg.var,
+                None => continue,
+            };
+            
+            let value = cpu.read_reg(var);
+            reg_values.push(value);
+            c_reg_names.push(reg_name.as_ptr());
+        }
+        
+        // Call the C callback
+        if !c_reg_names.is_empty() {
+            unsafe {
+                (reg_hook.callback)(
+                    reg_hook.user_data,
+                    reg_hook.name.as_ptr(),
+                    addr,
+                    c_reg_names.len(),
+                    c_reg_names.as_ptr(),
+                    reg_values.as_ptr(),
+                );
+            }
+        }
+    };
+    
+    // Add hook to VM
+    let hook_id = vm.next_execution_hook_id;
+    vm.next_execution_hook_id += 1;
+    
+    // Add execution hook to the VM
+    let internal_hook_id = vm.vm.cpu.add_hook(Box::new(hook_fn.clone()));
+    // Register to activate the hook at specific address
+    icicle_vm::injector::register_block_hook_injector(&mut vm.vm, address, address + 1, internal_hook_id);
+    
+    // Store for future reference
+    vm.execution_hooks.insert(hook_id, Box::new(hook_fn));
+    
+    hook_id
+}
+
+// Default debug hook that will be used if environment variable configuration is used
+extern "C" fn default_log_write_hook(data: *mut c_void, name: *const c_char, address: u64, size: u8, value: u64) {
+    let name_str = unsafe { 
+        if name.is_null() { 
+            "unknown" 
+        } else { 
+            CStr::from_ptr(name).to_str().unwrap_or("invalid") 
+        }
+    };
+    eprintln!("[WRITE] {}@{:#x} = {:#x} (size={})", name_str, address, value, size);
+}
+
+// Default debug hook for register values
+extern "C" fn default_log_regs_hook(data: *mut c_void, name: *const c_char, address: u64, num_regs: usize, reg_names: *const *const c_char, reg_values: *const u64) {
+    let name_str = unsafe { 
+        if name.is_null() { 
+            "unknown" 
+        } else { 
+            CStr::from_ptr(name).to_str().unwrap_or("invalid") 
+        }
+    };
+    eprintln!("[REGS] {}@{:#x}:", name_str, address);
+    
+    for i in 0..num_regs {
+        unsafe {
+            let reg_name = if reg_names.is_null() { 
+                "?" 
+            } else { 
+                let ptr = *reg_names.add(i);
+                if ptr.is_null() {
+                    "?"
+                } else {
+                    CStr::from_ptr(ptr).to_str().unwrap_or("?")
+                }
+            };
+            let value = if reg_values.is_null() { 0 } else { *reg_values.add(i) };
+            eprintln!("  {} = {:#x}", reg_name, value);
+        }
+    }
+}
+
+/// Parse a memory write hook definition in the format "<name>=<address>:<size>"
+fn parse_write_hook(entry: &str) -> Option<(&str, u64, u8)> {
+    let entry = entry.trim();
+    if entry.is_empty() {
+        return None;
+    }
+    let (name, addr_size) = entry.split_once('=')?;
+    let (addr, size) = addr_size.split_once(':')?;
+
+    let addr = icicle_vm::cpu::utils::parse_u64_with_prefix(addr)?;
+    let size: u8 = size.parse().ok()?;
+
+    Some((name, addr, size))
+}
+
+/// Parse a register hook definition in the format "<name>@<address>=<reglist>"
+fn parse_reg_print_hook(entry: &str) -> Option<(&str, u64, Vec<&str>)> {
+    let entry = entry.trim();
+    if entry.is_empty() {
+        return None;
+    }
+
+    let (target, reglist) = entry.split_once('=')?;
+    let (name, pc) = target.split_once('@')?;
+
+    let pc = icicle_vm::cpu::utils::parse_u64_with_prefix(pc)?;
+    let regs = reglist.split(',').map(str::trim).collect();
+
+    Some((name, pc, regs))
+}
+
+/// Set up debug instrumentation based on environment variables
+/// This emulates the behavior of add_debug_instrumentation in icicle-fuzzing
+///
+/// Supported environment variables:
+/// - ICICLE_LOG_WRITES: A semicolon-separated list of "<name>=<address>:<size>" entries
+/// - ICICLE_LOG_REGS: A semicolon-separated list of "<name>@<address>=<reg1>,<reg2>,...<regN>" entries
+/// - BREAKPOINTS: A comma-separated list of addresses to stop execution at
+#[no_mangle]
+pub extern "C" fn icicle_add_debug_instrumentation(vm_ptr: *mut Icicle) -> c_int {
+    if vm_ptr.is_null() {
+        return -1;
+    }
+    let vm = unsafe { &mut *vm_ptr };
+    
+    let mut hook_count = 0;
+    
+    // Process ICICLE_LOG_WRITES environment variable
+    if let Ok(entries) = std::env::var("ICICLE_LOG_WRITES") {
+        for entry in entries.split(';') {
+            match parse_write_hook(entry) {
+                Some((name, addr, size)) => {
+                    // Create string for logging
+                    let hook_id = icicle_debug_log_write(
+                        vm_ptr,
+                        CString::new(name).unwrap_or_else(|_| CString::new("unknown").unwrap()).as_ptr(),
+                        addr,
+                        size,
+                        default_log_write_hook,
+                        std::ptr::null_mut(),
+                    );
+                    if hook_id > 0 {
+                        hook_count += 1;
+                    }
+                }
+                None => eprintln!("Invalid write hook format: {}", entry),
+            }
+        }
+    }
+    
+    // Process ICICLE_LOG_REGS environment variable
+    if let Ok(entries) = std::env::var("ICICLE_LOG_REGS") {
+        for entry in entries.split(';') {
+            match parse_reg_print_hook(entry) {
+                Some((name, addr, reglist)) => {
+                    // Convert register list to C-compatible format
+                    let c_reg_names: Vec<CString> = reglist
+                        .iter()
+                        .map(|&r| CString::new(r).unwrap_or_else(|_| CString::new("unknown").unwrap()))
+                        .collect();
+                    
+                    let c_reg_ptrs: Vec<*const c_char> = c_reg_names
+                        .iter()
+                        .map(|s| s.as_ptr())
+                        .collect();
+                    
+                    let hook_id = icicle_debug_log_regs(
+                        vm_ptr,
+                        CString::new(name).unwrap_or_else(|_| CString::new("unknown").unwrap()).as_ptr(),
+                        addr,
+                        c_reg_names.len(),
+                        c_reg_ptrs.as_ptr(),
+                        default_log_regs_hook,
+                        std::ptr::null_mut(),
+                    );
+                    if hook_id > 0 {
+                        hook_count += 1;
+                    }
+                }
+                None => eprintln!("Invalid register hook format: {}", entry),
+            }
+        }
+    }
+    
+    // Process BREAKPOINTS environment variable
+    if let Ok(entries) = std::env::var("BREAKPOINTS") {
+        for entry in entries.split(',') {
+            match icicle_vm::cpu::utils::parse_u64_with_prefix(entry.trim()) {
+                Some(addr) => {
+                    if vm.add_breakpoint(addr) {
+                        hook_count += 1;
+                    }
+                }
+                None => eprintln!("Invalid breakpoint: {}", entry),
+            }
+        }
+    }
+    
+    hook_count as c_int
+}
+
+// Implementation of coverage-related functions
+
+/// Get the coverage map from the VM
+#[no_mangle]
+pub extern "C" fn icicle_get_coverage_map(
+    vm_ptr: *mut Icicle,
+    out_size: *mut usize,
+) -> *mut u8 {
+    if vm_ptr.is_null() || out_size.is_null() {
+        return ptr::null_mut();
+    }
+    let vm = unsafe { &mut *vm_ptr };
+    
+    // We'll use a simple coverage map stored in the VM instance
+    // This is populated during basic block execution via a hook
+    if vm.coverage_map.is_empty() {
+        return ptr::null_mut();
+    }
+    
+    let mut coverage_map = vm.coverage_map.clone();
+    
+    // Set the output size
+    unsafe { *out_size = coverage_map.len() };
+    
+    // Move ownership to C
+    let ptr = coverage_map.as_mut_ptr();
+    std::mem::forget(coverage_map);
+    
+    ptr
+}
+
+/// Set the coverage mode for instrumentation
+#[no_mangle]
+pub extern "C" fn icicle_set_coverage_mode(
+    vm_ptr: *mut Icicle,
+    mode: CoverageMode,
+) -> c_int {
+    if vm_ptr.is_null() {
+        return -1;
+    }
+    let vm = unsafe { &mut *vm_ptr };
+    
+    // Clear existing coverage data
+    vm.coverage_map.clear();
+    
+    // Initialize a coverage map based on the mode
+    // For block/edge coverage modes, we use a bit map
+    // For count modes, we use a counter map
+    let size = match mode {
+        CoverageMode::Blocks | CoverageMode::Edges => 4096, // 32K bits
+        CoverageMode::BlockCounts | CoverageMode::EdgeCounts => 4096 * 2, // 4K counters
+    };
+    
+    vm.coverage_map = vec![0; size];
+    vm.coverage_mode = mode;
+    
+    // If we already have an execution hook, remove it
+    if let Some(id) = vm.coverage_hook_id {
+        icicle_remove_execution_hook(vm_ptr, id);
+        vm.coverage_hook_id = None;
+    }
+    
+    // Add a new execution hook based on the mode
+    let hook_id = add_coverage_hook(vm_ptr, mode);
+    if hook_id == 0 {
+        return -1;
+    }
+    
+    vm.coverage_hook_id = Some(hook_id);
+    0
+}
+
+// Internal function to add the appropriate coverage hook
+fn add_coverage_hook(vm_ptr: *mut Icicle, mode: CoverageMode) -> u32 {
+    let vm = unsafe { &mut *vm_ptr };
+    
+    // Create a weak reference to the coverage map
+    let coverage_map_ptr = &mut vm.coverage_map as *mut Vec<u8>;
+    
+    // Since we can't modify the CPU directly, we'll use our execution hook system
+    let hook_fn: Box<dyn FnMut(&mut Cpu, u64)> = match mode {
+        CoverageMode::Blocks => {
+            Box::new(move |_cpu: &mut Cpu, pc: u64| {
+                // Calculate a hash/index based on the PC
+                let coverage_map = unsafe { &mut *coverage_map_ptr };
+                let idx = (pc as usize) % (coverage_map.len() * 8);
+                let byte_idx = idx / 8;
+                let bit_idx = idx % 8;
+                
+                if byte_idx < coverage_map.len() {
+                    coverage_map[byte_idx] |= 1 << bit_idx;
+                }
+            })
+        },
+        CoverageMode::Edges => {
+            // For edge coverage, we need to track the previous block
+            let mut prev_pc = 0;
+            Box::new(move |_cpu: &mut Cpu, pc: u64| {
+                // Calculate a hash/index based on the edge (prev_pc -> pc)
+                let coverage_map = unsafe { &mut *coverage_map_ptr };
+                let edge_hash = ((prev_pc >> 4) ^ pc) as usize; 
+                let idx = edge_hash % (coverage_map.len() * 8);
+                let byte_idx = idx / 8;
+                let bit_idx = idx % 8;
+                
+                if byte_idx < coverage_map.len() {
+                    coverage_map[byte_idx] |= 1 << bit_idx;
+                }
+                
+                prev_pc = pc;
+            })
+        },
+        CoverageMode::BlockCounts => {
+            Box::new(move |_cpu: &mut Cpu, pc: u64| {
+                // Calculate a hash/index based on the PC
+                let coverage_map = unsafe { &mut *coverage_map_ptr };
+                let idx = (pc as usize) % (coverage_map.len() / 2);
+                let byte_idx = idx * 2;
+                
+                if byte_idx + 1 < coverage_map.len() {
+                    // Increment the counter (2 bytes per counter)
+                    let counter = u16::from_le_bytes([
+                        coverage_map[byte_idx],
+                        coverage_map[byte_idx + 1]
+                    ]);
+                    
+                    // Don't overflow the counter
+                    if counter < u16::MAX {
+                        let new_counter = counter + 1;
+                        let bytes = new_counter.to_le_bytes();
+                        coverage_map[byte_idx] = bytes[0];
+                        coverage_map[byte_idx + 1] = bytes[1];
+                    }
+                }
+            })
+        },
+        CoverageMode::EdgeCounts => {
+            // Edge counts need to track previous block
+            let mut prev_pc = 0;
+            Box::new(move |_cpu: &mut Cpu, pc: u64| {
+                // Calculate a hash/index based on the edge (prev_pc -> pc)
+                let coverage_map = unsafe { &mut *coverage_map_ptr };
+                let edge_hash = ((prev_pc >> 4) ^ pc) as usize;
+                let idx = edge_hash % (coverage_map.len() / 2);
+                let byte_idx = idx * 2;
+                
+                if byte_idx + 1 < coverage_map.len() {
+                    // Increment the counter (2 bytes per counter)
+                    let counter = u16::from_le_bytes([
+                        coverage_map[byte_idx],
+                        coverage_map[byte_idx + 1]
+                    ]);
+                    
+                    // Don't overflow the counter
+                    if counter < u16::MAX {
+                        let new_counter = counter + 1;
+                        let bytes = new_counter.to_le_bytes();
+                        coverage_map[byte_idx] = bytes[0];
+                        coverage_map[byte_idx + 1] = bytes[1];
+                    }
+                }
+                
+                prev_pc = pc;
+            })
+        },
+    };
+    
+    // Register the hook with the system
+    let internal_id = vm.vm.cpu.add_hook(hook_fn);
+    
+    // Register a hook injector if we have a range specified
+    if vm.coverage_start_addr < vm.coverage_end_addr {
+        icicle_vm::injector::register_block_hook_injector(
+            &mut vm.vm, 
+            vm.coverage_start_addr, 
+            vm.coverage_end_addr, 
+            internal_id
+        );
+    } else {
+        // Register for all addresses
+        icicle_vm::injector::register_block_hook_injector(
+            &mut vm.vm, 
+            0, 
+            u64::MAX, 
+            internal_id
+        );
+    }
+    
+    // Generate and store the hook ID for later removal
+    let ffi_hook_id = vm.next_execution_hook_id;
+    
+    // We need to save a separate hook function for the FFI layer
+    // since the original hook_fn is consumed by the add_hook call
+    let hook_fn2: Box<dyn FnMut(&mut Cpu, u64)> = match mode {
+        CoverageMode::Blocks => {
+            Box::new(move |_cpu: &mut Cpu, pc: u64| {
+                // Calculate a hash/index based on the PC
+                let coverage_map = unsafe { &mut *coverage_map_ptr };
+                let idx = (pc as usize) % (coverage_map.len() * 8);
+                let byte_idx = idx / 8;
+                let bit_idx = idx % 8;
+                
+                if byte_idx < coverage_map.len() {
+                    coverage_map[byte_idx] |= 1 << bit_idx;
+                }
+            })
+        },
+        CoverageMode::Edges => {
+            // For edge coverage, we need to track the previous block
+            let mut prev_pc = 0;
+            Box::new(move |_cpu: &mut Cpu, pc: u64| {
+                // Calculate a hash/index based on the edge (prev_pc -> pc)
+                let coverage_map = unsafe { &mut *coverage_map_ptr };
+                let edge_hash = ((prev_pc >> 4) ^ pc) as usize; 
+                let idx = edge_hash % (coverage_map.len() * 8);
+                let byte_idx = idx / 8;
+                let bit_idx = idx % 8;
+                
+                if byte_idx < coverage_map.len() {
+                    coverage_map[byte_idx] |= 1 << bit_idx;
+                }
+                
+                prev_pc = pc;
+            })
+        },
+        CoverageMode::BlockCounts => {
+            Box::new(move |_cpu: &mut Cpu, pc: u64| {
+                // Calculate a hash/index based on the PC
+                let coverage_map = unsafe { &mut *coverage_map_ptr };
+                let idx = (pc as usize) % (coverage_map.len() / 2);
+                let byte_idx = idx * 2;
+                
+                if byte_idx + 1 < coverage_map.len() {
+                    // Increment the counter (2 bytes per counter)
+                    let counter = u16::from_le_bytes([
+                        coverage_map[byte_idx],
+                        coverage_map[byte_idx + 1]
+                    ]);
+                    
+                    // Don't overflow the counter
+                    if counter < u16::MAX {
+                        let new_counter = counter + 1;
+                        let bytes = new_counter.to_le_bytes();
+                        coverage_map[byte_idx] = bytes[0];
+                        coverage_map[byte_idx + 1] = bytes[1];
+                    }
+                }
+            })
+        },
+        CoverageMode::EdgeCounts => {
+            // Edge counts need to track previous block
+            let mut prev_pc = 0;
+            Box::new(move |_cpu: &mut Cpu, pc: u64| {
+                // Calculate a hash/index based on the edge (prev_pc -> pc)
+                let coverage_map = unsafe { &mut *coverage_map_ptr };
+                let edge_hash = ((prev_pc >> 4) ^ pc) as usize;
+                let idx = edge_hash % (coverage_map.len() / 2);
+                let byte_idx = idx * 2;
+                
+                if byte_idx + 1 < coverage_map.len() {
+                    // Increment the counter (2 bytes per counter)
+                    let counter = u16::from_le_bytes([
+                        coverage_map[byte_idx],
+                        coverage_map[byte_idx + 1]
+                    ]);
+                    
+                    // Don't overflow the counter
+                    if counter < u16::MAX {
+                        let new_counter = counter + 1;
+                        let bytes = new_counter.to_le_bytes();
+                        coverage_map[byte_idx] = bytes[0];
+                        coverage_map[byte_idx + 1] = bytes[1];
+                    }
+                }
+                
+                prev_pc = pc;
+            })
+        },
+    };
+    
+    vm.execution_hooks.insert(ffi_hook_id, hook_fn2);
+    vm.next_execution_hook_id += 1;
+    
+    ffi_hook_id
+}
+
+/// Get the current coverage mode
+#[no_mangle]
+pub extern "C" fn icicle_get_coverage_mode(
+    vm_ptr: *mut Icicle,
+) -> CoverageMode {
+    if vm_ptr.is_null() {
+        return CoverageMode::Blocks; // Default
+    }
+    let vm = unsafe { &*vm_ptr };
+    vm.coverage_mode
+}
+
+/// Enable instrumentation for a specific address range
+#[no_mangle]
+pub extern "C" fn icicle_enable_instrumentation(
+    vm_ptr: *mut Icicle,
+    start_addr: u64,
+    end_addr: u64,
+) -> c_int {
+    if vm_ptr.is_null() || start_addr >= end_addr {
+        return -1;
+    }
+    let vm = unsafe { &mut *vm_ptr };
+    
+    // Store the instrumentation range
+    vm.coverage_start_addr = start_addr;
+    vm.coverage_end_addr = end_addr;
+    
+    // Re-apply the current coverage mode with the new range
+    let current_mode = vm.coverage_mode;
+    icicle_set_coverage_mode(vm_ptr, current_mode);
+    
+    vm.instrumentation_enabled = true;
+    0
+}
+
+/// Set the number of context bits for edge coverage
+#[no_mangle]
+pub extern "C" fn icicle_set_context_bits(
+    vm_ptr: *mut Icicle,
+    bits: u8,
+) -> c_int {
+    if vm_ptr.is_null() || bits > 16 {
+        return -1;
+    }
+    let vm = unsafe { &mut *vm_ptr };
+    
+    // Store the context bits setting
+    vm.context_bits = bits;
+    
+    // We need to re-apply the coverage mode if it's edge-based
+    if vm.coverage_mode == CoverageMode::Edges || vm.coverage_mode == CoverageMode::EdgeCounts {
+        // Re-create the coverage hook with context bits
+        icicle_set_coverage_mode(vm_ptr, vm.coverage_mode);
+    }
+    
+    0
+}
+
+/// Get the current context bits setting
+#[no_mangle]
+pub extern "C" fn icicle_get_context_bits(
+    vm_ptr: *mut Icicle,
+) -> u8 {
+    if vm_ptr.is_null() {
+        return 0;
+    }
+    let vm = unsafe { &*vm_ptr };
+    vm.context_bits
+}
+
+/// Enable comparison coverage at the specified level
+#[no_mangle]
+pub extern "C" fn icicle_enable_compcov(
+    vm_ptr: *mut Icicle,
+    level: u8,
+) -> c_int {
+    if vm_ptr.is_null() {
+        return -1;
+    }
+    let vm = unsafe { &mut *vm_ptr };
+    
+    // Store the comparison coverage level
+    vm.compcov_level = level;
+    
+    // In a more complete implementation, we would register hooks for comparison instructions
+    // This is a simplified version that just stores the setting
+    0
+}
+
+/// Get the current compcov level
+#[no_mangle]
+pub extern "C" fn icicle_get_compcov_level(
+    vm_ptr: *mut Icicle,
+) -> u8 {
+    if vm_ptr.is_null() {
+        return 0;
+    }
+    let vm = unsafe { &*vm_ptr };
+    vm.compcov_level
+}
+
+/// Enable edge coverage
+#[no_mangle]
+pub extern "C" fn icicle_enable_edge_coverage(
+    vm_ptr: *mut Icicle,
+    enable: bool,
+) -> c_int {
+    if vm_ptr.is_null() {
+        return -1;
+    }
+    let vm = unsafe { &mut *vm_ptr };
+    
+    // Update the coverage mode based on the edge setting
+    if enable {
+        if vm.coverage_mode == CoverageMode::Blocks {
+            icicle_set_coverage_mode(vm_ptr, CoverageMode::Edges);
+        } else if vm.coverage_mode == CoverageMode::BlockCounts {
+            icicle_set_coverage_mode(vm_ptr, CoverageMode::EdgeCounts);
+        }
+    } else {
+        if vm.coverage_mode == CoverageMode::Edges {
+            icicle_set_coverage_mode(vm_ptr, CoverageMode::Blocks);
+        } else if vm.coverage_mode == CoverageMode::EdgeCounts {
+            icicle_set_coverage_mode(vm_ptr, CoverageMode::BlockCounts);
+        }
+    }
+    
+    0
+}
+
+/// Check if edge coverage is enabled
+#[no_mangle]
+pub extern "C" fn icicle_has_edge_coverage(
+    vm_ptr: *mut Icicle,
+) -> bool {
+    if vm_ptr.is_null() {
+        return false;
+    }
+    let vm = unsafe { &*vm_ptr };
+    vm.coverage_mode == CoverageMode::Edges || vm.coverage_mode == CoverageMode::EdgeCounts
+}
+
+/// Enable block coverage only (and optionally disable edge coverage)
+#[no_mangle]
+pub extern "C" fn icicle_enable_block_coverage(
+    vm_ptr: *mut Icicle,
+    only_blocks: bool,
+) -> c_int {
+    if vm_ptr.is_null() {
+        return -1;
+    }
+    let vm = unsafe { &mut *vm_ptr };
+    
+    // Turn off edge coverage if only_blocks is true
+    if only_blocks {
+        if vm.coverage_mode == CoverageMode::Edges {
+            icicle_set_coverage_mode(vm_ptr, CoverageMode::Blocks);
+        } else if vm.coverage_mode == CoverageMode::EdgeCounts {
+            icicle_set_coverage_mode(vm_ptr, CoverageMode::BlockCounts);
+        }
+    }
+    
+    0
+}
+
+/// Check if block coverage is being used
+#[no_mangle]
+pub extern "C" fn icicle_has_block_coverage(
+    vm_ptr: *mut Icicle,
+) -> bool {
+    if vm_ptr.is_null() {
+        return false;
+    }
+    let vm = unsafe { &*vm_ptr };
+    vm.coverage_mode == CoverageMode::Blocks || vm.coverage_mode == CoverageMode::BlockCounts
+}
+
+/// Check if count-based coverage is enabled
+#[no_mangle]
+pub extern "C" fn icicle_has_counts_coverage(
+    vm_ptr: *mut Icicle,
+) -> bool {
+    if vm_ptr.is_null() {
+        return false;
+    }
+    let vm = unsafe { &*vm_ptr };
+    vm.coverage_mode == CoverageMode::BlockCounts || vm.coverage_mode == CoverageMode::EdgeCounts
+}
+
+/// Reset the coverage map
+#[no_mangle]
+pub extern "C" fn icicle_reset_coverage(
+    vm_ptr: *mut Icicle,
+) {
+    if vm_ptr.is_null() {
+        return;
+    }
+    let vm = unsafe { &mut *vm_ptr };
+    
+    // Reset the coverage map to all zeros
+    for byte in &mut vm.coverage_map {
+        *byte = 0;
+    }
+}
+
+// Fix the unsafe marker that was previously removed
+unsafe impl Send for LabeledWriteHook {}
+unsafe impl Sync for LabeledWriteHook {}
