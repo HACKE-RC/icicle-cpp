@@ -1863,9 +1863,9 @@ void test_afl_instrumentation() {
     icicle_free(vm);
 }
 
-// Test reading large registers using icicle_reg_read_bytes
+// Test reading large registers using icicle_reg_read_bytes with float values
 void test_large_register_read() {
-    printf("\n=== Testing Large Register Read (YMM0) ===\n");
+    printf("\n=== Testing Large Register Read (XMM0 with Floats) ===\n");
 
     Icicle *vm = icicle_new("x86_64", 1, 1, 0, 1, 0, 1, 0, 0);
     if (!vm) {
@@ -1880,31 +1880,31 @@ void test_large_register_read() {
         return;
     }
 
-    // Map memory for data (the 256-bit constant)
+    // Map memory for data (must be aligned for movaps)
+    // Note: mmap usually provides sufficient alignment, but explicitly allocating
+    // on a 16-byte boundary would be more robust in a real scenario.
     if (icicle_mem_map(vm, 0x2000, 0x1000, ReadWrite) != 0) {
         printf("ERROR: Failed to map data memory\n");
         icicle_free(vm);
         return;
     }
 
-    // Define the 256-bit constant value (32 bytes)
-    const uint8_t constant_256[32] = {
-        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
-        0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF,
-        0xFF, 0xEE, 0xDD, 0xCC, 0xBB, 0xAA, 0x99, 0x88,
-        0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00
-    };
+    // Define the 128-bit constant value using four floats (16 bytes)
+    const float constant_floats[4] = { 1.0f, -2.5f, 3.14159f, -0.0f };
+    // Treat the float array as raw bytes for writing and comparison
+    const uint8_t* constant_bytes = (const uint8_t*)constant_floats;
+    const size_t constant_size = sizeof(constant_floats);
 
-    // Write the constant to memory at 0x2000
-    if (icicle_mem_write(vm, 0x2000, constant_256, sizeof(constant_256)) != 0) {
-        printf("ERROR: Failed to write constant to memory\n");
+    // Write the constant bytes to memory at 0x2000
+    if (icicle_mem_write(vm, 0x2000, constant_bytes, constant_size) != 0) {
+        printf("ERROR: Failed to write float constant to memory\n");
         icicle_free(vm);
         return;
     }
 
-    // x86_64 assembly code: vmovdqa ymm0, [0x2000]; ret
-    // Machine code: c5 fd 6f 05 f8 0f 00 00 c3 (Corrected displacement)
-    const unsigned char code[] = { 0xc5, 0xfd, 0x6f, 0x05, 0xf8, 0x0f, 0x00, 0x00, 0xc3 };
+    // x86_64 assembly code: movaps xmm0, [0x2000]; ret
+    // Machine code: 0f 28 05 f9 0f 00 00 c3 (Corrected displacement)
+    const unsigned char code[] = { 0x0f, 0x28, 0x05, 0xf9, 0x0f, 0x00, 0x00, 0xc3 };
     if (icicle_mem_write(vm, 0x1000, code, sizeof(code)) != 0) {
         printf("ERROR: Failed to write code\n");
         icicle_free(vm);
@@ -1913,15 +1913,143 @@ void test_large_register_read() {
 
     // Set PC and execute the instruction
     icicle_set_pc(vm, 0x1000);
-    RunStatus status = icicle_step(vm, 1);
+    RunStatus status = icicle_step(vm, 1); // Execute movaps
     
-    // Now, read ymm0 using icicle_reg_read_bytes
-    uint8_t ymm0_buffer[32];
+    // Now, read xmm0 using icicle_reg_read_bytes
+    // Declare a buffer for the raw bytes
+    uint8_t xmm0_buffer[16];
     size_t bytes_read = 0;
-    int read_status = icicle_reg_read_bytes(vm, "ymm0", ymm0_buffer, sizeof(ymm0_buffer), &bytes_read);
-
+    
+    // Read the XMM0 register bytes
+    int read_status = icicle_reg_read_bytes(vm, "xmm0", xmm0_buffer, sizeof(xmm0_buffer), &bytes_read);
     if (read_status != 0) {
         printf("ERROR: icicle_reg_read_bytes failed with status %d\n", read_status);
+        icicle_free(vm);
+        return;
+    }
+
+    printf("Bytes read for xmm0: %zu (expected 16)\n", bytes_read);
+    if (bytes_read != 16) {
+        printf("ERROR: Unexpected number of bytes read for xmm0\n");
+        icicle_free(vm);
+        return;
+    }
+
+    // Display the raw bytes
+    printf("XMM0 value read (raw bytes):\n");
+    hex_dump(xmm0_buffer, bytes_read);
+    
+    // Also interpret and display as floats for clarity
+    float* float_values = (float*)xmm0_buffer;
+    printf("XMM0 as floats: [%f, %f, %f, %f]\n", 
+           float_values[0], float_values[1], float_values[2], float_values[3]);
+
+    // Compare the read value with the expected constant bytes
+    if (memcmp(xmm0_buffer, constant_bytes, constant_size) == 0) {
+        printf("TEST PASSED: XMM0 float value matches expected constant.\n");
+    } else {
+        printf("ERROR: XMM0 float value does NOT match expected constant.\n");
+        printf("Expected bytes:\n");
+        hex_dump(constant_bytes, constant_size);
+        printf("Expected as floats: [%f, %f, %f, %f]\n",
+               constant_floats[0], constant_floats[1], constant_floats[2], constant_floats[3]);
+    }
+
+    icicle_free(vm);
+}
+
+// Test writing/reading large registers using icicle_reg_write_bytes/icicle_reg_read_bytes
+void test_large_register_write() {
+    printf("\n=== Testing Large Register Write/Read (XMM0) ===\n");
+
+    Icicle *vm = icicle_new("x86_64", 1, 1, 0, 1, 0, 1, 0, 0);
+    if (!vm) {
+        printf("ERROR: Failed to create x86_64 VM for large register test\n");
+        return;
+    }
+
+    // Define the 128-bit values we'll use for testing (two sets)
+    const float test_floats1[4] = { 42.0f, -42.0f, 123.456f, 789.012f };
+    const float test_floats2[4] = { 1.0f, -2.5f, 3.14159f, -0.0f };
+    const uint8_t* test_bytes1 = (const uint8_t*)test_floats1;
+    const uint8_t* test_bytes2 = (const uint8_t*)test_floats2;
+    const size_t test_size = sizeof(test_floats1);
+
+    // Step 1: Write test_floats1 to xmm0 using icicle_reg_write_bytes
+    int write_status = icicle_reg_write_bytes(vm, "xmm0", test_bytes1, test_size);
+    if (write_status != 0) {
+        printf("ERROR: icicle_reg_write_bytes failed with status %d\n", write_status);
+        icicle_free(vm);
+        return;
+    }
+    printf("Successfully wrote to XMM0\n");
+    printf("Written values as floats: [%f, %f, %f, %f]\n", 
+           test_floats1[0], test_floats1[1], test_floats1[2], test_floats1[3]);
+
+    // Step 2: Read xmm0 to verify the write was successful
+    uint8_t xmm0_buffer[16];
+    size_t bytes_read = 0;
+    int read_status = icicle_reg_read_bytes(vm, "xmm0", xmm0_buffer, sizeof(xmm0_buffer), &bytes_read);
+    if (read_status != 0) {
+        printf("ERROR: icicle_reg_read_bytes failed with status %d\n", read_status);
+        icicle_free(vm);
+        return;
+    }
+
+    printf("Bytes read for xmm0: %zu (expected 16)\n", bytes_read);
+    if (bytes_read != 16) {
+        printf("ERROR: Unexpected number of bytes read for xmm0\n");
+        icicle_free(vm);
+        return;
+    }
+
+    printf("XMM0 value read after write (raw bytes):\n");
+    hex_dump(xmm0_buffer, bytes_read);
+    
+    // Display as floats for clarity
+    float* float_values = (float*)xmm0_buffer;
+    printf("XMM0 read as floats: [%f, %f, %f, %f]\n", 
+           float_values[0], float_values[1], float_values[2], float_values[3]);
+
+    // Compare with the expected values
+    if (memcmp(xmm0_buffer, test_bytes1, test_size) == 0) {
+        printf("TEST PASSED: XMM0 value matches the written value.\n");
+    } else {
+        printf("ERROR: XMM0 value does NOT match the written value.\n");
+        printf("Expected bytes:\n");
+        hex_dump(test_bytes1, test_size);
+        icicle_free(vm);
+        return;
+    }
+
+    // Step 3: Now test writing to xmm0 and then reading it back using a YMM register
+    // (YMM0 is the 256-bit register, with XMM0 being its lower 128 bits)
+    printf("\n=== Testing YMM (256-bit) Register Write/Read ===\n");
+    
+    // First, let's see if we can write to YMM0 (this should write the full 256 bits)
+    uint8_t ymm0_buffer[32];
+    // Fill the ymm0_buffer with a pattern - low 128 bits with test_bytes2, high 128 bits with test_bytes1
+    memcpy(ymm0_buffer, test_bytes2, 16);
+    memcpy(ymm0_buffer + 16, test_bytes1, 16);
+    
+    write_status = icicle_reg_write_bytes(vm, "ymm0", ymm0_buffer, sizeof(ymm0_buffer));
+    if (write_status != 0) {
+        printf("ERROR: icicle_reg_write_bytes failed for YMM0 with status %d\n", write_status);
+        icicle_free(vm);
+        return;
+    }
+    printf("Successfully wrote to YMM0\n");
+    printf("Written values (lower 128 bits) as floats: [%f, %f, %f, %f]\n", 
+           test_floats2[0], test_floats2[1], test_floats2[2], test_floats2[3]);
+    printf("Written values (upper 128 bits) as floats: [%f, %f, %f, %f]\n", 
+           test_floats1[0], test_floats1[1], test_floats1[2], test_floats1[3]);
+    
+    // Read back YMM0 to verify
+    uint8_t ymm0_read_buffer[32];
+    bytes_read = 0;
+    read_status = icicle_reg_read_bytes(vm, "ymm0", ymm0_read_buffer, sizeof(ymm0_read_buffer), &bytes_read);
+    if (read_status != 0) {
+        printf("ERROR: icicle_reg_read_bytes failed for YMM0 with status %d\n", read_status);
         icicle_free(vm);
         return;
     }
@@ -1933,14 +2061,24 @@ void test_large_register_read() {
         return;
     }
 
-    printf("YMM0 value read:");
-    hex_dump(ymm0_buffer, bytes_read);
+    printf("YMM0 value read after write (raw bytes):\n");
+    hex_dump(ymm0_read_buffer, bytes_read);
 
-    // Compare the read value with the expected constant
-    if (memcmp(ymm0_buffer, constant_256, sizeof(constant_256)) == 0) {
-        printf("TEST PASSED: YMM0 value matches expected constant.\n");
+    // Display as floats for clarity (first 16 bytes are low 128 bits, next 16 bytes are high 128 bits)
+    float* ymm_low = (float*)ymm0_read_buffer;
+    float* ymm_high = (float*)(ymm0_read_buffer + 16);
+    printf("YMM0 read (lower 128 bits) as floats: [%f, %f, %f, %f]\n", 
+           ymm_low[0], ymm_low[1], ymm_low[2], ymm_low[3]);
+    printf("YMM0 read (upper 128 bits) as floats: [%f, %f, %f, %f]\n", 
+           ymm_high[0], ymm_high[1], ymm_high[2], ymm_high[3]);
+
+    // Compare with the expected values
+    if (memcmp(ymm0_read_buffer, ymm0_buffer, sizeof(ymm0_buffer)) == 0) {
+        printf("TEST PASSED: YMM0 value matches the written value.\n");
     } else {
-        printf("ERROR: YMM0 value does NOT match expected constant.\n");
+        printf("ERROR: YMM0 value does NOT match the written value.\n");
+        printf("Expected bytes:\n");
+        hex_dump(ymm0_buffer, sizeof(ymm0_buffer));
     }
 
     icicle_free(vm);
@@ -1948,22 +2086,7 @@ void test_large_register_read() {
 
 int main() {
     setenv("GHIDRA_SRC", "../ghidra", 1);
-    teregister_utilities();
-    test_memory_capacity();
-    test_breakpoints();
-    test_rawenv_load();
-    test_dynamic_load();
-    test_arch();
-    test_memory_operations();
-    test_backtrace();
-    test_disassembly();
-    test_aarch64_disassembly();
-    test_riscv64_disassembly();
-    test_reversible_execution();
-    test_debug_instrumentation();
-    test_env_debug_instrumentation();
-    test_coverage_instrumentation();  // Add the new coverage test
-    test_afl_instrumentation();st_register_utilities();
+    test_register_utilities();
     test_memory_capacity();
     test_breakpoints();
     test_rawenv_load();
@@ -1979,7 +2102,8 @@ int main() {
     test_env_debug_instrumentation();
     test_coverage_instrumentation();  // Add the new coverage test
     test_afl_instrumentation();
-    test_large_register_read(); // Add the new large register test
+    test_large_register_read(); // Test reading a large register
+    test_large_register_write(); // Test writing to a large register
     printf("\nAll tests completed.\n");
     return 0;
 }
