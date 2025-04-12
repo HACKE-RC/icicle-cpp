@@ -2440,3 +2440,51 @@ pub extern "C" fn icicle_reset_coverage(
 // Fix the unsafe marker that was previously removed
 unsafe impl Send for LabeledWriteHook {}
 unsafe impl Sync for LabeledWriteHook {}
+
+#[no_mangle]
+pub extern "C" fn icicle_reg_read_bytes(
+    vm_ptr: *mut Icicle,
+    reg_name: *const c_char,
+    out_buffer: *mut u8, // Use u8* for raw bytes
+    buffer_size: usize,
+    out_bytes_read: *mut usize,
+) -> c_int {
+    if vm_ptr.is_null() || reg_name.is_null() || out_buffer.is_null() || out_bytes_read.is_null() {
+        return -1;
+    }
+    let vm = unsafe { &mut *vm_ptr };
+    let c_str = unsafe { CStr::from_ptr(reg_name) };
+    let name = match c_str.to_str() {
+        Ok(s) => s,
+        Err(_) => return -1, // Invalid UTF-8
+    };
+
+    match reg_find(vm, name) {
+        Ok(reg) => {
+            let reg_size = reg.var.size as usize;
+            // Ensure the provided buffer is large enough
+            if buffer_size < reg_size {
+                return -1; // Buffer too small
+            }
+
+            // Read the raw bytes directly from the Regs storage
+            if let Some(bytes) = vm.vm.cpu.regs.get(reg.var) {
+                 // Check length just in case, though reg.var.size should be correct
+                if bytes.len() != reg_size {
+                     eprintln!("Warning: Register size mismatch for {}", name);
+                     return -1;
+                }
+                unsafe {
+                    // Copy the bytes to the C buffer
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buffer, reg_size);
+                    // Write the actual number of bytes read
+                    *out_bytes_read = reg_size;
+                }
+                0 // Success
+            } else {
+                -1 // Should not happen if reg_find succeeded, but handle defensively
+            }
+        }
+        Err(_) => -1, // Register not found
+    }
+}

@@ -182,6 +182,19 @@ void icicle_reg_list_free(RegInfo* regs, size_t count);
 int icicle_reg_size(Icicle* ptr, const char* reg_name);
 int icicle_reg_read(Icicle* ptr, const char* reg_name, uint64_t* out_value);
 int icicle_reg_write(Icicle* ptr, const char* reg_name, uint64_t value);
+
+/**
+ * @brief Reads the raw bytes of a register into a provided buffer.
+ *
+ * @param ptr Pointer to the Icicle VM instance.
+ * @param reg_name The name of the register to read.
+ * @param out_buffer Pointer to the buffer where the register bytes will be written.
+ * @param buffer_size The size of the provided buffer in bytes.
+ * @param out_bytes_read Pointer to a size_t where the actual number of bytes read (the register size) will be stored.
+ * @return 0 on success, -1 on failure (e.g., invalid register, buffer too small).
+ */
+int icicle_reg_read_bytes(Icicle* ptr, const char* reg_name, uint8_t* out_buffer, size_t buffer_size, size_t* out_bytes_read);
+
 size_t icicle_get_mem_capacity(Icicle* ptr);
 int icicle_set_mem_capacity(Icicle* ptr, size_t capacity);
 bool icicle_add_breakpoint(Icicle* ptr, uint64_t address);
