@@ -195,6 +195,17 @@ int icicle_reg_write(Icicle* ptr, const char* reg_name, uint64_t value);
  */
 int icicle_reg_read_bytes(Icicle* ptr, const char* reg_name, uint8_t* out_buffer, size_t buffer_size, size_t* out_bytes_read);
 
+/**
+ * @brief Writes raw bytes to a register.
+ *
+ * @param ptr Pointer to the Icicle VM instance.
+ * @param reg_name The name of the register to write to.
+ * @param buffer Pointer to the buffer containing the bytes to write.
+ * @param buffer_size The size of the buffer in bytes.
+ * @return 0 on success, -1 on failure (e.g., invalid register, buffer size doesn't match register size).
+ */
+int icicle_reg_write_bytes(Icicle* ptr, const char* reg_name, const uint8_t* buffer, size_t buffer_size);
+
 size_t icicle_get_mem_capacity(Icicle* ptr);
 int icicle_set_mem_capacity(Icicle* ptr, size_t capacity);
 bool icicle_add_breakpoint(Icicle* ptr, uint64_t address);
