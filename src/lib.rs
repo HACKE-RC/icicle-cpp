@@ -2577,3 +2577,36 @@ pub extern "C" fn icicle_reg_write_bytes(
         Err(_) => -1, // Register not found
     }
 }
+
+#[no_mangle]
+pub extern "C" fn icicle_breakpoint_list(vm_ptr: *mut Icicle, out_count: *mut usize) -> *mut u64 {
+    if vm_ptr.is_null() || out_count.is_null() {
+        return ptr::null_mut();
+    }
+    let vm = unsafe { &*vm_ptr };
+
+    // Get the breakpoints from the Vm's CodeCache
+    let breakpoints: Vec<u64> = vm.vm.code.breakpoints.iter().cloned().collect();
+    
+    if breakpoints.is_empty() {
+        unsafe { *out_count = 0 };
+        return ptr::null_mut();
+    }
+    
+    unsafe { *out_count = breakpoints.len() };
+    
+    // Convert the Vec<u64> into a raw pointer for C
+    let boxed_slice = breakpoints.into_boxed_slice();
+    Box::into_raw(boxed_slice) as *mut u64
+}
+
+#[no_mangle]
+pub extern "C" fn icicle_breakpoint_list_free(list: *mut u64, count: usize) {
+    if list.is_null() || count == 0 {
+        return;
+    }
+    unsafe {
+        let slice = std::slice::from_raw_parts_mut(list, count);
+        let _ = Box::from_raw(slice as *mut [u64]);
+    }
+}

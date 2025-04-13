@@ -2084,6 +2084,152 @@ void test_large_register_write() {
     icicle_free(vm);
 }
 
+// Test the exception code mapping in icicle_get_exception_code
+void test_exception_code_mapping() {
+    printf("\n=== Testing Exception Code Mapping ===\n");
+
+    Icicle *vm = icicle_new("x86_64", 1, 1, 0, 1, 0, 1, 0, 0);
+    if (!vm) {
+        printf("ERROR: Failed to create x86_64 VM for exception code test\n");
+        return;
+    }
+
+    // Map memory for code
+    if (icicle_mem_map(vm, 0x1000, 0x1000, ReadWrite) != 0) {
+        printf("ERROR: Failed to map memory\n");
+        icicle_free(vm);
+        return;
+    }
+
+    // Attempt to execute from non-executable memory (should trigger ExecViolation)
+    printf("Setting PC to non-executable memory...\n");
+    icicle_set_pc(vm, 0x1000);
+
+    // Run and expect execution violation exception
+    RunStatus status = icicle_step(vm, 1);
+    printf("Run status: %d\n", status);
+    
+    // Get the exception code
+    IcicleExceptionCode ex_code = icicle_get_exception_code(vm);
+    printf("Exception code: %u\n", ex_code);
+    
+    // Check if code matches the expected value from IcicleExceptionCode enum
+    if (ex_code == Exception_ExecViolation) {
+        printf("TEST PASSED: Exception code mapping works correctly.\n");
+        printf("Internal code 0x0401 (1025) was correctly mapped to %d (Exception_ExecViolation)\n", Exception_ExecViolation);
+    } else {
+        printf("TEST FAILED: Expected exception code %d but got %d\n", Exception_ExecViolation, ex_code);
+        
+        // Debug output in case the mapping is still incorrect
+        if (ex_code == 0x0401) {
+            printf("ERROR: The internal code 0x0401 (1025) was returned directly without mapping!\n");
+        } else {
+            printf("ERROR: Unexpected exception code value\n");
+        }
+    }
+
+    icicle_free(vm);
+}
+
+// Test listing breakpoints
+void test_breakpoint_listing() {
+    printf("\n=== Testing Breakpoint Listing ===\n");
+
+    Icicle *vm = icicle_new("x86_64", 1, 1, 0, 1, 0, 1, 0, 0);
+    if (!vm) {
+        printf("ERROR: Failed to create x86_64 VM for breakpoint list test\n");
+        return;
+    }
+
+    // Set some breakpoints
+    uint64_t bp1 = 0x1000;
+    uint64_t bp2 = 0x2050;
+    uint64_t bp3 = 0x3000;
+    printf("Setting breakpoints at: 0x%lx, 0x%lx, 0x%lx\n", bp1, bp2, bp3);
+    icicle_add_breakpoint(vm, bp1);
+    icicle_add_breakpoint(vm, bp2);
+    icicle_add_breakpoint(vm, bp3);
+
+    // Retrieve the list of breakpoints
+    size_t count = 0;
+    uint64_t* bp_list = icicle_breakpoint_list(vm, &count);
+
+    if (!bp_list) {
+        if (count == 0) {
+            printf("ERROR: Failed to retrieve breakpoint list, but count is 0 (should be 3)\n");
+        } else {
+            printf("ERROR: Failed to retrieve breakpoint list (returned NULL)\n");
+        }
+        icicle_free(vm);
+        return;
+    }
+
+    printf("Retrieved %zu breakpoints:\n", count);
+    for (size_t i = 0; i < count; ++i) {
+        printf("  Breakpoint %zu: 0x%lx\n", i + 1, bp_list[i]);
+    }
+
+    // Verify the count and content (order might not be guaranteed)
+    bool found1 = false, found2 = false, found3 = false;
+    if (count == 3) {
+        for (size_t i = 0; i < count; ++i) {
+            if (bp_list[i] == bp1) found1 = true;
+            if (bp_list[i] == bp2) found2 = true;
+            if (bp_list[i] == bp3) found3 = true;
+        }
+        if (found1 && found2 && found3) {
+            printf("TEST PASSED: Retrieved breakpoint list matches expected values.\n");
+        } else {
+            printf("ERROR: Retrieved breakpoint list does not contain all expected values.\n");
+        }
+    } else {
+        printf("ERROR: Expected 3 breakpoints, but got %zu\n", count);
+    }
+
+    // Free the list
+    icicle_breakpoint_list_free(bp_list, count);
+
+    // Remove a breakpoint and check again
+    printf("\nRemoving breakpoint at 0x%lx...\n", bp2);
+    icicle_remove_breakpoint(vm, bp2);
+    
+    bp_list = icicle_breakpoint_list(vm, &count);
+    if (!bp_list) {
+         if (count == 0) {
+            printf("ERROR: Failed to retrieve breakpoint list after removal (count is 0, should be 2)\n");
+        } else {
+             printf("ERROR: Failed to retrieve breakpoint list after removal (returned NULL)\n");
+        }
+        icicle_free(vm);
+        return;
+    }
+    
+    printf("Retrieved %zu breakpoints after removal:\n", count);
+    for (size_t i = 0; i < count; ++i) {
+        printf("  Breakpoint %zu: 0x%lx\n", i + 1, bp_list[i]);
+    }
+
+    found1 = false; found2 = false; found3 = false;
+    if (count == 2) {
+         for (size_t i = 0; i < count; ++i) {
+            if (bp_list[i] == bp1) found1 = true;
+            if (bp_list[i] == bp2) found2 = true; // This should be false now
+            if (bp_list[i] == bp3) found3 = true;
+        }
+        if (found1 && !found2 && found3) {
+            printf("TEST PASSED: Retrieved breakpoint list after removal is correct.\n");
+        } else {
+            printf("ERROR: Retrieved breakpoint list after removal is incorrect.\n");
+        }
+    } else {
+        printf("ERROR: Expected 2 breakpoints after removal, but got %zu\n", count);
+    }
+
+    icicle_breakpoint_list_free(bp_list, count);
+
+    icicle_free(vm);
+}
+
 int main() {
     setenv("GHIDRA_SRC", "../ghidra", 1);
     test_register_utilities();
@@ -2100,10 +2246,12 @@ int main() {
     test_reversible_execution();
     test_debug_instrumentation();
     test_env_debug_instrumentation();
-    test_coverage_instrumentation();  // Add the new coverage test
+    test_coverage_instrumentation();
     test_afl_instrumentation();
-    test_large_register_read(); // Test reading a large register
-    test_large_register_write(); // Test writing to a large register
+    test_large_register_read();
+    test_large_register_write();
+    test_exception_code_mapping();
+    test_breakpoint_listing(); // Add the new test
     printf("\nAll tests completed.\n");
     return 0;
 }
