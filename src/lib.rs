@@ -1060,7 +1060,48 @@ pub extern "C" fn icicle_get_exception_code(ptr: *const Icicle) -> u32 {
     let vm = unsafe { &*ptr };
     
     // Get the exception code from the CPU
-    vm.vm.cpu.exception.code
+    let raw_code = vm.vm.cpu.exception.code;
+    
+    // Convert the internal exception code to the C API's IcicleExceptionCode
+    // We need to map the internal hex values to the sequential values expected by the C API
+    match raw_code {
+        0x0000 => 0,  // Exception_NoException
+        0x0001 => 1,  // Exception_InstructionLimit
+        0x0002 => 2,  // Exception_Halt
+        0x0003 => 3,  // Exception_Sleep
+        0x0101 => 4,  // Exception_Syscall
+        0x0102 => 5,  // Exception_CpuStateChanged
+        0x0103 => 6,  // Exception_DivisionException
+        0x0201 => 7,  // Exception_ReadUnmapped
+        0x0202 => 8,  // Exception_ReadPerm
+        0x0203 => 9,  // Exception_ReadUnaligned
+        0x0204 => 10, // Exception_ReadWatch
+        0x0205 => 11, // Exception_ReadUninitialized
+        0x0301 => 12, // Exception_WriteUnmapped
+        0x0302 => 13, // Exception_WritePerm
+        0x0303 => 14, // Exception_WriteWatch
+        0x0304 => 15, // Exception_WriteUnaligned
+        0x0401 => 16, // Exception_ExecViolation
+        0x0402 => 17, // Exception_SelfModifyingCode
+        0x0501 => 18, // Exception_OutOfMemory
+        0x0502 => 19, // Exception_AddressOverflow
+        0x1001 => 20, // Exception_InvalidInstruction
+        0x1002 => 21, // Exception_UnknownInterrupt
+        0x1003 => 22, // Exception_UnknownCpuID
+        0x1004 => 23, // Exception_InvalidOpSize
+        0x1005 => 24, // Exception_InvalidFloatSize
+        0x1006 => 25, // Exception_CodeNotTranslated
+        0x1007 => 26, // Exception_ShadowStackOverflow
+        0x1008 => 27, // Exception_ShadowStackInvalid
+        0x1009 => 28, // Exception_InvalidTarget
+        0x100a => 29, // Exception_UnimplementedOp
+        0x2001 => 30, // Exception_ExternalAddr
+        0x2002 => 31, // Exception_Environment
+        0x3001 => 32, // Exception_JitError
+        0x3002 => 33, // Exception_InternalError
+        0x3003 => 34, // Exception_UnmappedRegister
+        _ => 35,      // Exception_UnknownError
+    }
 }
 
 impl Environment for RawEnvironment {
