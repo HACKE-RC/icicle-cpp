@@ -8,6 +8,12 @@ name = "icicle"
 path = "lib.rs"
 crate-type = ["staticlib"]
 
+[profile.dev]
+opt-level = 0
+debug = true
+split-debuginfo = "unpacked"
+lto = false
+
 [dependencies]
 icicle-vm = { git = "https://github.com/icicle-emu/icicle-emu" }
 icicle-cpu = { git = "https://github.com/icicle-emu/icicle-emu" }

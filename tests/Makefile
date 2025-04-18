@@ -48,6 +48,7 @@ clean:
 	$(RM) ./tests-debug
 	$(RM) ./hook-tests-debug
 	$(RM) ./snapshot-tests-debug
+	$(RM) ./features-debug
 	$(RM) ./tests-release
 	$(RM) ./hook-tests-release
 	$(RM) ./snapshot-tests-release

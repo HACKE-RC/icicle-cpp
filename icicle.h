@@ -136,6 +136,13 @@ typedef struct {
     void* env;  // Opaque pointer to environment snapshot
 } VmSnapshot;
 
+// ----- NEW: Structure for Memory Region Information -----
+typedef struct {
+    uint64_t address;
+    uint64_t size;
+    MemoryProtection protection;
+} MemRegionInfo;
+
 // Snapshot and restore functions
 CpuSnapshot* icicle_cpu_snapshot(Icicle* vm);
 int icicle_cpu_restore(Icicle* vm, const CpuSnapshot* snapshot);
@@ -210,6 +217,24 @@ size_t icicle_get_mem_capacity(Icicle* ptr);
 int icicle_set_mem_capacity(Icicle* ptr, size_t capacity);
 bool icicle_add_breakpoint(Icicle* ptr, uint64_t address);
 bool icicle_remove_breakpoint(Icicle* ptr, uint64_t address);
+
+/**
+ * @brief Retrieves a list of currently set breakpoint addresses.
+ *
+ * @param ptr Pointer to the Icicle VM instance.
+ * @param out_count Pointer to a size_t where the number of breakpoints will be stored.
+ * @return A pointer to an array of uint64_t breakpoint addresses. The caller is responsible for freeing this array using icicle_breakpoint_list_free(). Returns NULL on failure or if no breakpoints are set.
+ */
+uint64_t* icicle_breakpoint_list(Icicle* ptr, size_t* out_count);
+
+/**
+ * @brief Frees the memory allocated for the breakpoint list returned by icicle_breakpoint_list.
+ *
+ * @param list Pointer to the breakpoint list array.
+ * @param count The number of elements in the list (returned by icicle_breakpoint_list).
+ */
+void icicle_breakpoint_list_free(uint64_t* list, size_t count);
+
 RunStatus icicle_run_until(Icicle* ptr, uint64_t address);
 RawEnvironment* icicle_rawenv_new();
 void icicle_rawenv_free(RawEnvironment* env);
@@ -293,6 +318,27 @@ int icicle_enable_block_coverage(Icicle* ptr, bool only_blocks);
 bool icicle_has_block_coverage(Icicle* ptr);
 bool icicle_has_counts_coverage(Icicle* ptr);
 void icicle_reset_coverage(Icicle* ptr);
+
+// ----- NEW: Functions for listing mapped memory regions -----
+
+/**
+ * @brief Retrieves a list of physically mapped memory regions in the VM.
+ *
+ * @param ptr Pointer to the Icicle VM instance.
+ * @param out_count Pointer to a size_t where the number of mapped regions will be stored.
+ * @return A pointer to an array of MemRegionInfo structs. The caller is responsible
+ *         for freeing this array using icicle_mem_list_mapped_free().
+ *         Returns NULL on failure or if no regions are mapped.
+ */
+MemRegionInfo* icicle_mem_list_mapped(Icicle* ptr, size_t* out_count);
+
+/**
+ * @brief Frees the memory allocated for the memory region list returned by icicle_mem_list_mapped.
+ *
+ * @param list Pointer to the MemRegionInfo array.
+ * @param count The number of elements in the list (returned by icicle_mem_list_mapped).
+ */
+void icicle_mem_list_mapped_free(MemRegionInfo* list, size_t count);
 
 #ifdef __cplusplus
 }

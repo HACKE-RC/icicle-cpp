@@ -1,0 +1,141 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"jsonFile" : "directory-.-Debug-f5ebdc15457944623624.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.15"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2,
+						3,
+						4,
+						5,
+						6,
+						7,
+						8,
+						9
+					]
+				}
+			],
+			"name" : "Debug",
+			"projects" : 
+			[
+				{
+					"directoryIndexes" : 
+					[
+						0
+					],
+					"name" : "Icicle",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2,
+						3,
+						4,
+						5,
+						6,
+						7,
+						8,
+						9
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 0,
+					"id" : "archs::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-archs-Debug-a22b06d399f184ab7dc1.json",
+					"name" : "archs",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "hook_tests_debug::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-hook_tests_debug-Debug-83aad04582180d41a77a.json",
+					"name" : "hook_tests_debug",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "hook_tests_release::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-hook_tests_release-Debug-eecf94d36c84fa70be3c.json",
+					"name" : "hook_tests_release",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "run::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-run-Debug-47a3b3fedeb003f03663.json",
+					"name" : "run",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "run_all::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-run_all-Debug-6b5cab053b54bd51b6af.json",
+					"name" : "run_all",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "run_release::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-run_release-Debug-23b7f967c4244f8798d5.json",
+					"name" : "run_release",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "snapshot_tests_debug::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-snapshot_tests_debug-Debug-255debf4ee1df70e18b8.json",
+					"name" : "snapshot_tests_debug",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "snapshot_tests_release::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-snapshot_tests_release-Debug-d2ccc252988cb7c05ce9.json",
+					"name" : "snapshot_tests_release",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "tests_debug::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-tests_debug-Debug-c9c133ca252a3a782315.json",
+					"name" : "tests_debug",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "tests_release::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-tests_release-Debug-a63fa9ba9163bc3c1c31.json",
+					"name" : "tests_release",
+					"projectIndex" : 0
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "/home/rc/icicle-cpp/tests/cmake-build-debug",
+		"source" : "/home/rc/icicle-cpp/tests"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 7
+	}
+}

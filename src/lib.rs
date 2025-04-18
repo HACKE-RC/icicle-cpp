@@ -2,20 +2,12 @@ use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_uchar, c_void};
 use std::ptr;
-use icicle_cpu::mem::{Mapping, perm, Mmu, ReadAfterHook, WriteHook};
-use icicle_cpu::{Cpu, ValueSource, VmExit, ExceptionCode, HookHandler, Regs, ShadowStack, Exception};
+use icicle_cpu::mem::{Mapping, perm, Mmu, ReadAfterHook, WriteHook, MemoryMapping};
+use icicle_cpu::{Cpu, ValueSource, VmExit, ExceptionCode, Regs, ShadowStack, Exception};
 use icicle_vm::cpu::{Environment, debug_info::{DebugInfo, SourceLocation}};
-use icicle_vm;
+use icicle_vm::cpu::mem::AllocLayout;
 use target_lexicon::Architecture;
 use sleigh_runtime::NamedRegister;
-use icicle_vm::cpu::mem::{AllocLayout};
-use crate::icicle_vm::injector;
-use icicle_vm::{
-    cpu::{BlockGroup, BlockTable},
-    CodeInjector, Vm,
-};
-use pcode::Op;
-use icicle_vm::cpu;
 
 pub type ViolationFunction = extern "C" fn(data: *mut c_void, address: u64, permission: u8, unmapped: c_int) -> c_int;
 pub type RawFunction = extern "C" fn(data: *mut c_void);
@@ -2608,5 +2600,150 @@ pub extern "C" fn icicle_breakpoint_list_free(list: *mut u64, count: usize) {
     unsafe {
         let slice = std::slice::from_raw_parts_mut(list, count);
         let _ = Box::from_raw(slice as *mut [u64]);
+    }
+}
+
+// Helper function to map underlying permission bits back to our MemoryProtection enum.
+fn perm_to_protection(perm: u8) -> MemoryProtection {
+    let read = (perm & perm::READ) != 0;
+    let write = (perm & perm::WRITE) != 0;
+    let exec = (perm & perm::EXEC) != 0;
+
+    match (read, write, exec) {
+        (true, true, true) => MemoryProtection::ExecuteReadWrite,
+        (true, true, false) => MemoryProtection::ReadWrite,
+        (true, false, true) => MemoryProtection::ExecuteRead,
+        (true, false, false) => MemoryProtection::ReadOnly,
+        (false, false, true) => MemoryProtection::ExecuteOnly,
+        _ => MemoryProtection::NoAccess,
+    }
+}
+
+// ----- C-compatible struct for memory region info -----
+#[repr(C)]
+pub struct MemRegionInfo {
+    pub address: u64,
+    pub size: u64,
+    pub protection: MemoryProtection,
+}
+
+/// Retrieves a list of physically mapped memory regions in the VM.
+///
+/// @param vm_ptr Pointer to the Icicle VM instance.
+/// @param out_count Pointer to a size_t where the number of mapped regions will be stored.
+/// @return A pointer to an array of MemRegionInfo structs. The caller is responsible
+///         for freeing this array using icicle_mem_list_mapped_free().
+///         Returns NULL on failure or if no regions are mapped.
+#[no_mangle]
+pub extern "C" fn icicle_mem_list_mapped(vm_ptr: *mut Icicle, out_count: *mut usize) -> *mut MemRegionInfo {
+    if vm_ptr.is_null() || out_count.is_null() {
+        // Ensure out_count is initialized even on early failure
+        if !out_count.is_null() { unsafe { *out_count = 0 }; }
+        return ptr::null_mut();
+    }
+    let vm = unsafe { &*vm_ptr };
+    let mapping = vm.vm.cpu.mem.get_mapping();
+
+    // Iterate through the blocks reported by the mapping iterator
+    // Then scan within each block to find contiguous mapped regions
+    let mut regions = Vec::new();
+    let mut next_scan_start = 0_u64; // Track the next address to start scanning from
+
+    for (block_start, block_len, _entry) in mapping.iter() {
+
+        // Skip this block entirely if we've already scanned past its beginning
+        if block_start < next_scan_start {
+            continue;
+        }
+
+        let block_end = match block_start.checked_add(block_len) {
+            Some(end) => end,
+            None => u64::MAX, // Handle potential overflow for block end
+        };
+
+        // Start scanning from where we left off, or the block start, whichever is greater
+        let mut current_addr = std::cmp::max(block_start, next_scan_start);
+
+        while current_addr < block_end {
+            let current_perm = vm.vm.cpu.mem.get_perm(current_addr);
+
+            if current_perm != perm::NONE {
+                // Found the start of an actually mapped region
+                let region_start = current_addr;
+                let mut region_end = region_start;
+
+                // Scan forward within the block to find the end of contiguous permissions
+                loop {
+                    // Check next address, carefully handling potential overflow and block boundary
+                    let next_addr = match region_end.checked_add(1) {
+                        Some(addr) if addr < block_end => addr,
+                        _ => break, // Reached end of block or u64::MAX
+                    };
+
+                    if vm.vm.cpu.mem.get_perm(next_addr) == current_perm {
+                        region_end = next_addr; // Extend region
+                    } else {
+                        break; // Permission changed
+                    }
+                }
+
+                let region_size = region_end - region_start + 1;
+                regions.push(MemRegionInfo {
+                    address: region_start,
+                    size: region_size,
+                    protection: perm_to_protection(current_perm),
+                });
+
+                // Update next_scan_start to the address AFTER the detected region
+                next_scan_start = match region_end.checked_add(1) {
+                     Some(addr) => addr,
+                     None => u64::MAX, // Reached end of address space
+                };
+                current_addr = next_scan_start; // Continue inner scan from the next address
+
+                if current_addr == u64::MAX || current_addr >= block_end { 
+                    break; // Exit inner loop if wrapped or passed block end
+                }
+
+            } else {
+                // Address is unmapped, advance to the next address within the block
+                 current_addr = match current_addr.checked_add(1) {
+                    Some(addr) if addr < block_end => addr,
+                    _ => break, // Reached end of block or u64::MAX
+                 };
+                 // Keep next_scan_start updated even when skipping unmapped ranges
+                 next_scan_start = std::cmp::max(next_scan_start, current_addr);
+            }
+        }
+        // Ensure next_scan_start reflects progress made in this block
+        // (handles cases where inner loop finishes exactly at block_end)
+        next_scan_start = std::cmp::max(next_scan_start, current_addr);
+
+        if next_scan_start == u64::MAX { break; } // Exit outer loop if we wrapped around
+    }
+
+    /* --- Code to return the collected regions --- */
+    if regions.is_empty() {
+        unsafe { *out_count = 0 };
+        return ptr::null_mut();
+    }
+
+    unsafe { *out_count = regions.len() };
+    let boxed_slice = regions.into_boxed_slice();
+    Box::into_raw(boxed_slice) as *mut MemRegionInfo
+}
+
+/// Frees the memory allocated for the memory region list returned by icicle_mem_list_mapped.
+///
+/// @param list Pointer to the MemRegionInfo array.
+/// @param count The number of elements in the list (returned by icicle_mem_list_mapped).
+#[no_mangle]
+pub extern "C" fn icicle_mem_list_mapped_free(list: *mut MemRegionInfo, count: usize) {
+    if list.is_null() || count == 0 {
+        return;
+    }
+    unsafe {
+        let slice = std::slice::from_raw_parts_mut(list, count);
+        let _ = Box::from_raw(slice as *mut [MemRegionInfo]);
     }
 }

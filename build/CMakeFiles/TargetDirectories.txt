@@ -1,0 +1,12 @@
+/home/rc/icicle-cpp/build/CMakeFiles/tests_debug.dir
+/home/rc/icicle-cpp/build/CMakeFiles/hook_tests_debug.dir
+/home/rc/icicle-cpp/build/CMakeFiles/snapshot_tests_debug.dir
+/home/rc/icicle-cpp/build/CMakeFiles/archs.dir
+/home/rc/icicle-cpp/build/CMakeFiles/tests_release.dir
+/home/rc/icicle-cpp/build/CMakeFiles/hook_tests_release.dir
+/home/rc/icicle-cpp/build/CMakeFiles/snapshot_tests_release.dir
+/home/rc/icicle-cpp/build/CMakeFiles/run.dir
+/home/rc/icicle-cpp/build/CMakeFiles/run_release.dir
+/home/rc/icicle-cpp/build/CMakeFiles/run_all.dir
+/home/rc/icicle-cpp/build/CMakeFiles/edit_cache.dir
+/home/rc/icicle-cpp/build/CMakeFiles/rebuild_cache.dir

@@ -2230,6 +2230,93 @@ void test_breakpoint_listing() {
     icicle_free(vm);
 }
 
+// Test listing mapped memory regions
+void test_memory_region_listing() {
+    printf("\n=== Testing Memory Region Listing ===\n");
+
+    Icicle *vm = icicle_new("x86_64", 1, 1, 0, 1, 0, 1, 0, 0);
+    if (!vm) {
+        printf("ERROR: Failed to create x86_64 VM for region list test\n");
+        return;
+    }
+
+    // Map some regions with different permissions
+    uint64_t addr1 = 0x1000, size1 = 0x1000;
+    MemoryProtection prot1 = ReadWrite;
+    uint64_t addr2 = 0x5000, size2 = 0x2000;
+    MemoryProtection prot2 = ExecuteRead;
+    uint64_t addr3 = 0x9000, size3 = 0x800;
+    MemoryProtection prot3 = ReadOnly;
+
+    printf("Mapping regions:\n");
+    printf("  0x%lx [0x%lx bytes] -> %d\n", addr1, size1, prot1);
+    if (icicle_mem_map(vm, addr1, size1, prot1) != 0) {
+        printf("ERROR: Failed to map region 1\n");
+        icicle_free(vm);
+        return;
+    }
+    printf("  0x%lx [0x%lx bytes] -> %d\n", addr2, size2, prot2);
+    if (icicle_mem_map(vm, addr2, size2, prot2) != 0) {
+        printf("ERROR: Failed to map region 2\n");
+        icicle_free(vm);
+        return;
+    }
+    printf("  0x%lx [0x%lx bytes] -> %d\n", addr3, size3, prot3);
+    if (icicle_mem_map(vm, addr3, size3, prot3) != 0) {
+        printf("ERROR: Failed to map region 3\n");
+        icicle_free(vm);
+        return;
+    }
+
+    // Retrieve the list of mapped regions
+    size_t count = 0;
+    MemRegionInfo* region_list = icicle_mem_list_mapped(vm, &count);
+
+    if (!region_list) {
+        if (count == 0) {
+            printf("ERROR: Failed to retrieve region list, count is 0 (should be 3)\n");
+        } else {
+            printf("ERROR: Failed to retrieve region list (returned NULL)\n");
+        }
+        icicle_free(vm);
+        return;
+    }
+
+    printf("Retrieved %zu mapped regions:\n", count);
+    for (size_t i = 0; i < count; ++i) {
+        printf("  Region %zu: Address=0x%lx, Size=0x%lx, Protection=%d\n", 
+               i + 1, region_list[i].address, region_list[i].size, region_list[i].protection);
+    }
+
+    // Verify the count and content (order might not be guaranteed)
+    bool found1 = false, found2 = false, found3 = false;
+    if (count == 3) {
+        for (size_t i = 0; i < count; ++i) {
+            if (region_list[i].address == addr1 && region_list[i].size == size1 && region_list[i].protection == prot1) {
+                found1 = true;
+            }
+            if (region_list[i].address == addr2 && region_list[i].size == size2 && region_list[i].protection == prot2) {
+                found2 = true;
+            }
+            if (region_list[i].address == addr3 && region_list[i].size == size3 && region_list[i].protection == prot3) {
+                found3 = true;
+            }
+        }
+        if (found1 && found2 && found3) {
+            printf("TEST PASSED: Retrieved region list matches expected values.\n");
+        } else {
+            printf("ERROR: Retrieved region list does not contain all expected values or permissions are incorrect.\n");
+        }
+    } else {
+        printf("ERROR: Expected 3 regions, but got %zu\n", count);
+    }
+
+    // Free the list
+    icicle_mem_list_mapped_free(region_list, count);
+
+    icicle_free(vm);
+}
+
 int main() {
     setenv("GHIDRA_SRC", "../ghidra", 1);
     test_register_utilities();
@@ -2251,7 +2338,8 @@ int main() {
     test_large_register_read();
     test_large_register_write();
     test_exception_code_mapping();
-    test_breakpoint_listing(); // Add the new test
+    test_breakpoint_listing();
+    test_memory_region_listing();
     printf("\nAll tests completed.\n");
     return 0;
 }
