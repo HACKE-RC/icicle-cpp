@@ -295,6 +295,11 @@ uint32_t icicle_step_back(Icicle* ptr, uint64_t count);
 // Note: Can only go to instruction counts that are available in snapshots
 uint32_t icicle_goto_icount(Icicle* ptr, uint64_t target_icount);
 
+// Saves a snapshot at the current execution state.
+// Snapshots are required for step_back and goto_icount functionality.
+// Returns 0 on success, -1 on failure.
+int icicle_save_snapshot(Icicle* ptr);
+
 // Frees a string previously returned by a string-returning function
 void icicle_free_string(char* string);
 
