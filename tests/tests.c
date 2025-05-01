@@ -1182,8 +1182,6 @@ void test_reversible_execution() {
     icicle_free(vm);
 }
 
-// Callback functions for debug instrumentation testing
-
 // For the write logging
 void my_log_write_hook(void* data, const char* name, uint64_t address, uint8_t size, uint64_t value) {
     int* log_count = (int*)data;
