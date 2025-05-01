@@ -101,7 +101,7 @@ void test_compression_levels() {
     printf("\nSerializing VM state WITHOUT compression to '%s'...\n", filename);
     
     clock_t start_time = clock();
-    int ret = icicle_serialize_vm_state(vm, filename, true, 2); // log_level 2 = no compression
+    int ret = icicle_serialize_vm_state(vm, filename, true, 0); // log_level 0 = no compression
     clock_t end_time = clock();
     double time_taken = ((double)(end_time - start_time)) / CLOCKS_PER_SEC;
     
@@ -124,7 +124,7 @@ void test_compression_levels() {
         if (vm2) {
             printf("Deserializing VM state from '%s'...\n", filename);
             start_time = clock();
-            ret = icicle_deserialize_vm_state(vm2, filename, true, 2);
+            ret = icicle_deserialize_vm_state(vm2, filename, true, 0);
             end_time = clock();
             time_taken = ((double)(end_time - start_time)) / CLOCKS_PER_SEC;
             printf("Deserialization time: %.3f seconds\n", time_taken);
@@ -185,7 +185,7 @@ void test_compression_levels() {
         
         // Time the deserialization
         start_time = clock();
-        ret = icicle_deserialize_vm_state(vm2, filename, true, 2);
+        ret = icicle_deserialize_vm_state(vm2, filename, true, 0);
         end_time = clock();
         time_taken = ((double)(end_time - start_time)) / CLOCKS_PER_SEC;
         

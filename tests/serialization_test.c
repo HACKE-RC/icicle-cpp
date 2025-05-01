@@ -74,8 +74,8 @@ int test_serialization() {
     
     // Serialize VM state
     const char* filename = "test_state.bin";
-    printf("Serializing CPU state to %s...\n", filename);
-    int result = icicle_serialize_cpu_state(vm, filename, 1);
+    printf("Serializing CPU state to '%s'...\n", filename);
+    int result = icicle_serialize_cpu_state(vm, filename, 0);
     if (result != 0) {
         printf("ERROR: Failed to serialize CPU state, error code: %d\n", result);
         icicle_free(vm);
@@ -105,9 +105,9 @@ int test_serialization() {
     
     // Deserialize VM state
     printf("Deserializing CPU state from %s...\n", filename);
-    result = icicle_deserialize_cpu_state(vm, filename, 1);
+    result = icicle_deserialize_cpu_state(vm, filename, 0);
     if (result != 0) {
-        printf("ERROR: Failed to deserialize CPU state, error code: %d\n", result);
+        printf("ERROR: Failed to deserialize CPU state\n");
         icicle_free(vm);
         return 1;
     }

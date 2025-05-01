@@ -43,7 +43,7 @@ void test_basic_serialization() {
     
     // Serialize CPU state
     printf("Serializing CPU state to '%s'...\n", filename);
-    int ret = icicle_serialize_cpu_state(vm, filename, 2); // Verbose logging
+    int ret = icicle_serialize_cpu_state(vm, filename, 0); // No logging
     if (ret != 0) {
         fprintf(stderr, "Failed to serialize CPU state\n");
         icicle_free(vm);
@@ -89,7 +89,7 @@ void test_basic_serialization() {
     
     // Deserialize CPU state
     printf("Deserializing CPU state from '%s'...\n", filename);
-    ret = icicle_deserialize_cpu_state(vm, filename, 2); // Verbose logging
+    ret = icicle_deserialize_cpu_state(vm, filename, 0); // No logging
     if (ret != 0) {
         fprintf(stderr, "Failed to deserialize CPU state\n");
         icicle_free(vm);
@@ -223,7 +223,7 @@ void test_shadow_stack_serialization() {
     
     // Serialize CPU state
     printf("Serializing CPU state with shadow stack to '%s'...\n", filename);
-    int ret = icicle_serialize_cpu_state(vm, filename, 2); // Verbose logging
+    int ret = icicle_serialize_cpu_state(vm, filename, 0); // No logging
     if (ret != 0) {
         fprintf(stderr, "Failed to serialize CPU state\n");
         icicle_free(vm);
@@ -245,7 +245,7 @@ void test_shadow_stack_serialization() {
     
     // Deserialize CPU state into the new VM
     printf("Deserializing CPU state with shadow stack from '%s'...\n", filename);
-    ret = icicle_deserialize_cpu_state(vm2, filename, 2); // Verbose logging
+    ret = icicle_deserialize_cpu_state(vm2, filename, 0); // No logging
     if (ret != 0) {
         fprintf(stderr, "Failed to deserialize CPU state\n");
         icicle_free(vm);

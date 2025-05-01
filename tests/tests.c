@@ -2533,7 +2533,7 @@ void test_advanced_serialization(const char* filename) {
     
     // Serialize VM state
     printf("Serializing CPU state to %s...\n", filename);
-    if (icicle_serialize_cpu_state(vm, filename, 1) != 0) {
+    if (icicle_serialize_cpu_state(vm, filename, 0) != 0) {
         printf("Failed to serialize CPU state\n");
         icicle_free(vm);
         return;
@@ -2551,7 +2551,7 @@ void test_advanced_serialization(const char* filename) {
     
     // Deserialize VM state
     printf("Deserializing CPU state from %s...\n", filename);
-    if (icicle_deserialize_cpu_state(vm, filename, 1) != 0) {
+    if (icicle_deserialize_cpu_state(vm, filename, 0) != 0) {
         printf("Failed to deserialize CPU state\n");
         icicle_free(vm);
         return;
@@ -2760,7 +2760,7 @@ void test_memory_serialization(const char* filename) {
     
     // Serialize VM state with memory
     printf("Serializing VM state with memory to %s...\n", filename);
-    if (icicle_serialize_vm_state(vm, filename, true, 1) != 0) {
+    if (icicle_serialize_vm_state(vm, filename, true, 0) != 0) {
         printf("Failed to serialize VM state with memory\n");
         icicle_free(vm);
         return;
@@ -2778,7 +2778,7 @@ void test_memory_serialization(const char* filename) {
     
     // Deserialize VM state with memory
     printf("Deserializing VM state with memory from %s...\n", filename);
-    if (icicle_deserialize_vm_state(new_vm, filename, true, 1) != 0) {
+    if (icicle_deserialize_vm_state(new_vm, filename, true, 0) != 0) {
         printf("Failed to deserialize VM state with memory\n");
         icicle_free(vm);
         icicle_free(new_vm);
