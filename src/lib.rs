@@ -2,12 +2,20 @@ use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_uchar, c_void};
 use std::ptr;
+use std::fs::File;
+use std::io::{Read, Write};
 use icicle_cpu::mem::{Mapping, perm, Mmu, ReadAfterHook, WriteHook, MemoryMapping};
 use icicle_cpu::{Cpu, ValueSource, VmExit, ExceptionCode, Regs, ShadowStack, Exception};
 use icicle_vm::cpu::{Environment, debug_info::{DebugInfo, SourceLocation}};
 use icicle_vm::cpu::mem::AllocLayout;
 use target_lexicon::Architecture;
 use sleigh_runtime::NamedRegister;
+use serde::{Serialize, Deserialize};
+// We need to add bincode for serialization
+extern crate bincode;
+
+// Import log for logging
+extern crate tracing;
 
 pub type ViolationFunction = extern "C" fn(data: *mut c_void, address: u64, permission: u8, unmapped: c_int) -> c_int;
 pub type RawFunction = extern "C" fn(data: *mut c_void);
@@ -2745,5 +2753,598 @@ pub extern "C" fn icicle_mem_list_mapped_free(list: *mut MemRegionInfo, count: u
     unsafe {
         let slice = std::slice::from_raw_parts_mut(list, count);
         let _ = Box::from_raw(slice as *mut [MemRegionInfo]);
+    }
+}
+
+// ----- CPU State Serialization/Deserialization -----
+
+// Structure to hold serializable memory region information
+#[derive(Serialize, Deserialize, Clone)]
+struct SerializedMemoryRegion {
+    address: u64,
+    size: u64,
+    protection: u8, // Using raw protection value for consistency
+    content: Vec<u8>,
+}
+
+// Structure to hold serializable VM state (CPU + memory)
+#[derive(Serialize, Deserialize, Clone)]
+struct SerializableVmState {
+    // CPU state
+    regs_data: Vec<u8>,
+    shadow_stack_entries: Vec<(u64, u64)>, // (addr, block)
+    exception_code: u32,
+    exception_value: u64,
+    icount: u64,
+    
+    // Memory regions
+    memory_regions: Vec<SerializedMemoryRegion>,
+    // Serialization version for forward/backward compatibility
+    version: u32,
+}
+
+impl SerializableVmState {
+    // Version for serialization format
+    const CURRENT_VERSION: u32 = 1;
+    // Magic signature for compressed data
+    const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD]; // Standard zstd magic number
+    
+    // Create a serializable state from CPU and memory
+    fn from_vm(vm: &Icicle) -> Self {
+        // Get CPU state
+        let cpu = &vm.vm.cpu;
+        
+        // Capture register data
+        let regs = cpu.regs.clone();
+        let regs_data = unsafe { 
+            std::slice::from_raw_parts(
+                &regs as *const Regs as *const u8,
+                std::mem::size_of::<Regs>()
+            ).to_vec()
+        };
+
+        // Extract shadow stack entries
+        let shadow_stack_entries = if cpu.shadow_stack.depth() > 0 {
+            cpu.shadow_stack.as_slice()
+                .iter()
+                .map(|entry| {
+                    (entry.addr, entry.block)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        // Capture CPU exception and icount
+        let exception_code = cpu.exception.code;
+        let exception_value = cpu.exception.value;
+        let icount = cpu.icount;
+
+        // Capture memory regions
+        let mut memory_regions = Vec::new();
+        let mut region_count: usize = 0;
+        
+        // Use existing function to get mapped memory regions
+        let regions_ptr = unsafe { icicle_mem_list_mapped(vm as *const _ as *mut Icicle, &mut region_count as *mut usize) };
+        
+        if !regions_ptr.is_null() && region_count > 0 {
+            let regions = unsafe { std::slice::from_raw_parts(regions_ptr, region_count) };
+            
+            // For each region, capture metadata and content
+            for region in regions {
+                // Skip regions that are too large (optional safety check)
+                if region.size > 1024 * 1024 * 100 { // 100 MB limit per region
+                    tracing::warn!("Skipping very large memory region at 0x{:x} (size: {} bytes)", 
+                                  region.address, region.size);
+                    continue;
+                }
+                
+                // Read memory content
+                let mut content = Vec::new();
+                let size = region.size as usize;
+                
+                // Read the memory region content
+                let mut content_size: usize = 0;
+                let content_ptr = unsafe { 
+                    icicle_mem_read(
+                        vm as *const _ as *mut Icicle, 
+                        region.address, 
+                        size, 
+                        &mut content_size as *mut usize
+                    ) 
+                };
+                
+                if !content_ptr.is_null() && content_size > 0 {
+                    content = unsafe { 
+                        let slice = std::slice::from_raw_parts(content_ptr, content_size);
+                        slice.to_vec() 
+                    };
+                    
+                    // Free the buffer allocated by icicle_mem_read
+                    unsafe { icicle_free_buffer(content_ptr, content_size) };
+                }
+                
+                // Convert protection to numeric value
+                let protection = convert_protection(region.protection);
+                
+                // Add region to the list
+                memory_regions.push(SerializedMemoryRegion {
+                    address: region.address,
+                    size: region.size,
+                    protection,
+                    content,
+                });
+            }
+            
+            // Free the regions list
+            unsafe { icicle_mem_list_mapped_free(regions_ptr, region_count) };
+        }
+        
+        tracing::info!("Captured {} memory regions for serialization", memory_regions.len());
+
+        SerializableVmState {
+            regs_data,
+            shadow_stack_entries,
+            exception_code,
+            exception_value,
+            icount,
+            memory_regions,
+            version: Self::CURRENT_VERSION,
+        }
+    }
+
+    // Apply the serialized state to a VM
+    fn apply_to_vm(&self, vm: &mut Icicle) -> Result<(), String> {
+        // Check version compatibility
+        if self.version > Self::CURRENT_VERSION {
+            return Err(format!("Unsupported serialization version: {}", self.version));
+        }
+        
+        // Apply CPU state
+        let cpu = &mut vm.vm.cpu;
+        
+        // Apply register data
+        if self.regs_data.len() == std::mem::size_of::<Regs>() {
+            unsafe {
+                let regs_ptr = self.regs_data.as_ptr() as *const Regs;
+                cpu.regs = (*regs_ptr).clone();
+            }
+        } else {
+            return Err(format!("Invalid register data size: {}", self.regs_data.len()));
+        }
+
+        // Reset and rebuild shadow stack
+        let stack_depth = cpu.shadow_stack.depth();
+        for _ in 0..stack_depth {
+            cpu.pop_shadow_stack(0);
+        }
+        
+        for &(addr, _) in &self.shadow_stack_entries {
+            cpu.push_shadow_stack(addr);
+        }
+
+        // Apply exception data
+        cpu.exception.code = self.exception_code;
+        cpu.exception.value = self.exception_value;
+        
+        // Apply instruction count
+        cpu.icount = self.icount;
+        
+        // Apply memory regions
+        // First, track existing regions to avoid unnecessary unmapping/remapping
+        let mut existing_regions = HashMap::new();
+        let mut region_count: usize = 0;
+        
+        // Use existing function to get current mapped memory regions
+        let regions_ptr = unsafe { icicle_mem_list_mapped(vm as *const _ as *mut Icicle, &mut region_count as *mut usize) };
+        
+        if !regions_ptr.is_null() && region_count > 0 {
+            let regions = unsafe { std::slice::from_raw_parts(regions_ptr, region_count) };
+            
+            for region in regions {
+                existing_regions.insert(region.address, (region.size, region.protection));
+            }
+            
+            // Free the regions list
+            unsafe { icicle_mem_list_mapped_free(regions_ptr, region_count) };
+        }
+        
+        // Apply each serialized memory region
+        for region in &self.memory_regions {
+            let prot = perm_to_protection(region.protection);
+            
+            // Check if region already exists with same size and permissions
+            let needs_remap = match existing_regions.get(&region.address) {
+                Some(&(size, existing_prot)) => {
+                    size != region.size || existing_prot != prot
+                },
+                None => true,
+            };
+            
+            // If region needs remapping or doesn't exist
+            if needs_remap {
+                // If region already exists but with different size/prot, unmap it first
+                if existing_regions.contains_key(&region.address) {
+                    if let Err(e) = vm.mem_unmap(region.address, region.size) {
+                        tracing::warn!("Failed to unmap existing region at 0x{:x}: {}", region.address, e);
+                    }
+                }
+                
+                // Map new region
+                if let Err(e) = vm.mem_map(region.address, region.size, prot) {
+                    tracing::error!("Failed to map memory region at 0x{:x}: {}", region.address, e);
+                    continue;
+                }
+            } else if let Some(&(_, existing_prot)) = existing_regions.get(&region.address) {
+                // Region exists with same size but maybe different permissions
+                if existing_prot != prot {
+                    if let Err(e) = vm.mem_protect(region.address, region.size as usize, prot) {
+                        tracing::warn!("Failed to change memory protection at 0x{:x}: {}", region.address, e);
+                    }
+                }
+            }
+            
+            // Write memory content if available
+            if !region.content.is_empty() {
+                if let Err(e) = vm.mem_write(region.address, &region.content) {
+                    tracing::error!("Failed to write memory content at 0x{:x}: {}", region.address, e);
+                }
+            }
+        }
+        
+        Ok(())
+    }
+
+    // Serialize to binary
+    fn serialize(&self) -> Result<Vec<u8>, String> {
+        // Default to no compression
+        self.serialize_with_options(false, 0)
+    }
+    
+    // Serialize with compression options
+    fn serialize_with_options(&self, compress: bool, compression_level: i32) -> Result<Vec<u8>, String> {
+        // First serialize with bincode
+        let raw_data = bincode::serialize(self)
+            .map_err(|e| format!("Serialization error: {}", e))?;
+        
+        // If compression is enabled, compress the data
+        if compress {
+            // Ensure compression level is within valid range (1-22 for zstd)
+            let level = if compression_level <= 0 {
+                3 // Default compression level
+            } else if compression_level > 22 {
+                22 // Max compression level
+            } else {
+                compression_level
+            };
+            
+            // Compress the data
+            match zstd::encode_all(&raw_data[..], level) {
+                Ok(compressed) => {
+                    // Return compressed data with a header to identify it
+                    let mut result = Vec::with_capacity(compressed.len() + 4);
+                    result.extend_from_slice(&Self::ZSTD_MAGIC);
+                    result.extend_from_slice(&compressed);
+                    
+                    // Log compression ratio if tracing is enabled
+                    if !compressed.is_empty() {
+                        let ratio = (raw_data.len() as f64) / (compressed.len() as f64);
+                        tracing::info!("Data compressed: {} -> {} bytes (ratio: {:.2}x)", 
+                            raw_data.len(), compressed.len(), ratio);
+                    }
+                    
+                    Ok(result)
+                },
+                Err(e) => {
+                    tracing::warn!("Compression failed: {}. Falling back to uncompressed data.", e);
+                    Ok(raw_data)
+                }
+            }
+        } else {
+            // Return raw data
+            Ok(raw_data)
+        }
+    }
+
+    // Deserialize from binary
+    fn deserialize(data: &[u8]) -> Result<Self, String> {
+        // Check if data is compressed (has zstd magic number)
+        if data.len() > 4 && data[0..4] == Self::ZSTD_MAGIC {
+            // Decompress the data
+            match zstd::decode_all(&data[4..]) {
+                Ok(decompressed) => {
+                    // Log decompression info if tracing is enabled
+                    if !decompressed.is_empty() {
+                        let ratio = (decompressed.len() as f64) / ((data.len() - 4) as f64);
+                        tracing::info!("Data decompressed: {} -> {} bytes (ratio: {:.2}x)", 
+                            data.len() - 4, decompressed.len(), ratio);
+                    }
+                    
+                    // Deserialize the decompressed data
+                    bincode::deserialize(&decompressed)
+                        .map_err(|e| format!("Deserialization error: {}", e))
+                },
+                Err(e) => Err(format!("Decompression error: {}", e))
+            }
+        } else {
+            // Data is not compressed, deserialize directly
+            bincode::deserialize(data)
+                .map_err(|e| format!("Deserialization error: {}", e))
+        }
+    }
+    
+    // Deserialize with options
+    fn deserialize_with_options(data: &[u8], allow_decompression: bool) -> Result<Self, String> {
+        // Check if data is compressed (has zstd magic number)
+        if allow_decompression && data.len() > 4 && data[0..4] == Self::ZSTD_MAGIC {
+            // Decompress the data
+            match zstd::decode_all(&data[4..]) {
+                Ok(decompressed) => {
+                    // Log decompression info if tracing is enabled
+                    if !decompressed.is_empty() {
+                        let ratio = (decompressed.len() as f64) / ((data.len() - 4) as f64);
+                        tracing::info!("Data decompressed: {} -> {} bytes (ratio: {:.2}x)", 
+                            data.len() - 4, decompressed.len(), ratio);
+                    }
+                    
+                    // Deserialize the decompressed data
+                    bincode::deserialize(&decompressed)
+                        .map_err(|e| format!("Deserialization error: {}", e))
+                },
+                Err(e) => Err(format!("Decompression error: {}", e))
+            }
+        } else {
+            // Data is not compressed or decompression not allowed, deserialize directly
+            bincode::deserialize(data)
+                .map_err(|e| format!("Deserialization error: {}", e))
+        }
+    }
+}
+
+// ----- FFI Functions for Serialization/Deserialization -----
+
+// Define the log level constants
+const LOG_NONE: i32 = 0;
+const LOG_ERRORS: i32 = 1;
+const LOG_VERBOSE: i32 = 2;
+
+#[no_mangle]
+pub extern "C" fn icicle_serialize_vm_state(
+    vm_ptr: *mut Icicle,
+    filename: *const c_char,
+    include_memory: bool,
+    log_level: c_int
+) -> c_int {
+    if vm_ptr.is_null() || filename.is_null() {
+        return -1;
+    }
+
+    let vm = unsafe { &mut *vm_ptr };
+    let filename_cstr = unsafe { CStr::from_ptr(filename) };
+    let filename_str = match filename_cstr.to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            if log_level > 0 {
+                tracing::error!("Failed to convert filename to UTF-8 string");
+            }
+            return -1;
+        }
+    };
+
+    if log_level > 0 {
+        if include_memory {
+            tracing::info!("Serializing VM state (CPU+memory) to file: {}", filename_str);
+        } else {
+            tracing::info!("Serializing CPU state to file: {}", filename_str);
+        }
+    }
+
+    // Get the VM state
+    let vm_state = SerializableVmState::from_vm(vm);
+    
+    // If we don't want to include memory, create a copy without memory regions
+    let serialized_data = if include_memory {
+        // Determine whether to compress and at what level based on log_level
+        // For simplicity: if log_level > 2, enable compression with level = log_level - 2
+        let use_compression = log_level > 2;
+        let compression_level = log_level - 2;
+        
+        match vm_state.serialize_with_options(use_compression, compression_level) {
+            Ok(data) => data,
+            Err(err) => {
+                if log_level > 0 {
+                    tracing::error!("Failed to serialize VM state: {}", err);
+                }
+                return -1;
+            }
+        }
+    } else {
+        // Create a copy without memory regions
+        let cpu_only_state = SerializableVmState {
+            regs_data: vm_state.regs_data,
+            shadow_stack_entries: vm_state.shadow_stack_entries,
+            exception_code: vm_state.exception_code,
+            exception_value: vm_state.exception_value,
+            icount: vm_state.icount,
+            memory_regions: Vec::new(),
+            version: vm_state.version,
+        };
+        
+        // For CPU-only, use compression if log_level > 2
+        let use_compression = log_level > 2;
+        let compression_level = log_level - 2;
+        
+        match cpu_only_state.serialize_with_options(use_compression, compression_level) {
+            Ok(data) => data,
+            Err(err) => {
+                if log_level > 0 {
+                    tracing::error!("Failed to serialize CPU state: {}", err);
+                }
+                return -1;
+            }
+        }
+    };
+
+    // Write to file
+    match std::fs::write(filename_str, &serialized_data) {
+        Ok(_) => {
+            if log_level > 0 {
+                tracing::info!("Successfully wrote {} bytes to {}", serialized_data.len(), filename_str);
+            }
+            0 // Success
+        }
+        Err(err) => {
+            if log_level > 0 {
+                tracing::error!("Failed to write to file: {}", err);
+            }
+            -1 // Error
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn icicle_deserialize_vm_state(
+    vm_ptr: *mut Icicle,
+    filename: *const c_char,
+    apply_memory: bool,
+    log_level: c_int
+) -> c_int {
+    if vm_ptr.is_null() || filename.is_null() {
+        return -1;
+    }
+
+    let vm = unsafe { &mut *vm_ptr };
+    let filename_cstr = unsafe { CStr::from_ptr(filename) };
+    let filename_str = match filename_cstr.to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            if log_level > 0 {
+                tracing::error!("Failed to convert filename to UTF-8 string");
+            }
+            return -1;
+        }
+    };
+
+    if log_level > 0 {
+        if apply_memory {
+            tracing::info!("Deserializing VM state (CPU+memory) from file: {}", filename_str);
+        } else {
+            tracing::info!("Deserializing CPU state from file: {}", filename_str);
+        }
+    }
+
+    // Read from file
+    let serialized_data = match std::fs::read(filename_str) {
+        Ok(data) => data,
+        Err(err) => {
+            if log_level > 0 {
+                tracing::error!("Failed to read from file: {}", err);
+            }
+            return -1;
+        }
+    };
+
+    // Deserialize the VM state with decompression enabled
+    let mut vm_state = match SerializableVmState::deserialize_with_options(&serialized_data, true) {
+        Ok(state) => state,
+        Err(err) => {
+            if log_level > 0 {
+                tracing::error!("Failed to deserialize VM state: {}", err);
+            }
+            return -1;
+        }
+    };
+    
+    // If we don't want to apply memory, clear the memory regions
+    if !apply_memory {
+        vm_state.memory_regions.clear();
+    }
+
+    // Apply the VM state
+    match vm_state.apply_to_vm(vm) {
+        Ok(_) => {
+            if log_level > 0 {
+                if apply_memory {
+                    tracing::info!("Successfully restored VM state (CPU+memory) from {}", filename_str);
+                } else {
+                    tracing::info!("Successfully restored CPU state from {}", filename_str);
+                }
+            }
+            0 // Success
+        },
+        Err(err) => {
+            if log_level > 0 {
+                tracing::error!("Failed to apply VM state: {}", err);
+            }
+            -1 // Error
+        }
+    }
+}
+
+// For backwards compatibility
+#[no_mangle]
+pub extern "C" fn icicle_serialize_cpu_state(
+    vm_ptr: *mut Icicle,
+    filename: *const c_char,
+    log_level: c_int
+) -> c_int {
+    // Call the new function with include_memory=false
+    icicle_serialize_vm_state(vm_ptr, filename, false, log_level)
+}
+
+#[no_mangle]
+pub extern "C" fn icicle_deserialize_cpu_state(
+    vm_ptr: *mut Icicle,
+    filename: *const c_char,
+    log_level: c_int
+) -> c_int {
+    // Call the new function with apply_memory=false
+    icicle_deserialize_vm_state(vm_ptr, filename, false, log_level)
+}
+
+// Function to get the size of serialized data (useful for pre-allocating buffers)
+#[no_mangle]
+pub extern "C" fn icicle_get_serialized_size(vm_ptr: *mut Icicle) -> usize {
+    if vm_ptr.is_null() {
+        return 0;
+    }
+    
+    let vm = unsafe { &mut *vm_ptr };
+    
+    // Create serializable state (CPU only for compatibility)
+    let vm_state = SerializableVmState::from_vm(vm);
+    let cpu_only_state = SerializableVmState {
+        regs_data: vm_state.regs_data,
+        shadow_stack_entries: vm_state.shadow_stack_entries,
+        exception_code: vm_state.exception_code,
+        exception_value: vm_state.exception_value,
+        icount: vm_state.icount,
+        memory_regions: Vec::new(),
+        version: vm_state.version,
+    };
+    
+    // Serialize to get size
+    match cpu_only_state.serialize() {
+        Ok(data) => data.len(),
+        Err(_) => 0,
+    }
+}
+
+// Get the estimated size with memory included
+#[no_mangle]
+pub extern "C" fn icicle_get_vm_serialized_size(vm_ptr: *mut Icicle) -> usize {
+    if vm_ptr.is_null() {
+        return 0;
+    }
+    
+    let vm = unsafe { &mut *vm_ptr };
+    
+    // Create full serializable state
+    let vm_state = SerializableVmState::from_vm(vm);
+    
+    // Serialize to get size
+    match vm_state.serialize() {
+        Ok(data) => data.len(),
+        Err(_) => 0,
     }
 }

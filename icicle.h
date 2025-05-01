@@ -345,6 +345,93 @@ MemRegionInfo* icicle_mem_list_mapped(Icicle* ptr, size_t* out_count);
  */
 void icicle_mem_list_mapped_free(MemRegionInfo* list, size_t count);
 
+/**
+ * @brief Serializes the current VM state (CPU and optionally memory) to a file
+ *
+ * @param vm_ptr Pointer to the Icicle VM instance.
+ * @param filename The path where the serialized state will be saved.
+ * @param include_memory Whether to include memory regions in the serialization.
+ * @param log_level Controls the verbosity of logging and compression:
+ *        - 0: No logging, no compression
+ *        - 1: Error logging only, no compression
+ *        - 2: Verbose logging, no compression
+ *        - 3+: Verbose logging with compression (level = log_level - 2)
+ * @return 0 on success, -1 on failure.
+ * 
+ * @note When log_level > 2, zstd compression is applied with compression level = log_level - 2.
+ *       For example, log_level=3 enables compression level 1, log_level=5 enables level 3, etc.
+ *       Maximum valid compression level is 22 (log_level=24).
+ */
+int icicle_serialize_vm_state(Icicle* vm_ptr, const char* filename, bool include_memory, int log_level);
+
+/**
+ * @brief Deserializes VM state from a file and applies it to the VM
+ *
+ * @param vm_ptr Pointer to the Icicle VM instance.
+ * @param filename The path from which to load the serialized state.
+ * @param apply_memory Whether to restore memory regions from the serialized state.
+ * @param log_level Controls the verbosity of logging:
+ *        - 0: No logging
+ *        - 1: Error logging only
+ *        - 2+: Verbose logging
+ * @return 0 on success, -1 on failure.
+ * 
+ * @note This function automatically detects and handles zstd-compressed files.
+ *       Compression detection is performed by checking for the zstd magic signature.
+ */
+int icicle_deserialize_vm_state(Icicle* vm_ptr, const char* filename, bool apply_memory, int log_level);
+
+/**
+ * @brief Serializes the current CPU state to a file (without memory)
+ *
+ * This is kept for backward compatibility. It calls icicle_serialize_vm_state with include_memory=false.
+ *
+ * @param vm_ptr Pointer to the Icicle VM instance.
+ * @param filename The path where the serialized state will be saved.
+ * @param log_level Controls the verbosity of logging and compression:
+ *        - 0: No logging, no compression
+ *        - 1: Error logging only, no compression
+ *        - 2: Verbose logging, no compression
+ *        - 3+: Verbose logging with compression (level = log_level - 2)
+ * @return 0 on success, -1 on failure.
+ * 
+ * @note When log_level > 2, zstd compression is applied with compression level = log_level - 2.
+ */
+int icicle_serialize_cpu_state(Icicle* vm_ptr, const char* filename, int log_level);
+
+/**
+ * @brief Deserializes CPU state from a file and applies it to the VM (without memory)
+ *
+ * This is kept for backward compatibility. It calls icicle_deserialize_vm_state with apply_memory=false.
+ *
+ * @param vm_ptr Pointer to the Icicle VM instance.
+ * @param filename The path from which to load the serialized state.
+ * @param log_level Controls the verbosity of logging:
+ *        - 0: No logging
+ *        - 1: Error logging only
+ *        - 2+: Verbose logging
+ * @return 0 on success, -1 on failure.
+ * 
+ * @note This function automatically detects and handles zstd-compressed files.
+ */
+int icicle_deserialize_cpu_state(Icicle* vm_ptr, const char* filename, int log_level);
+
+/**
+ * @brief Returns the size in bytes that the current CPU state would require when serialized (without memory)
+ *
+ * @param vm_ptr Pointer to the Icicle VM instance.
+ * @return The size in bytes, or 0 on error.
+ */
+size_t icicle_get_serialized_size(Icicle* vm_ptr);
+
+/**
+ * @brief Returns the size in bytes that the current VM state would require when serialized (with memory)
+ *
+ * @param vm_ptr Pointer to the Icicle VM instance.
+ * @return The size in bytes, or 0 on error.
+ */
+size_t icicle_get_vm_serialized_size(Icicle* vm_ptr);
+
 #ifdef __cplusplus
 }
 #endif

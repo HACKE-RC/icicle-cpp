@@ -2384,6 +2384,519 @@ void test_memory_region_listing() {
     icicle_free(vm);
 }
 
+// Test code for comprehensive serialization testing
+// This assembly will:
+// 1. Use various registers
+// 2. Perform memory operations
+// 3. Use the stack
+// 4. Perform conditional operations
+// 5. Create a more complex CPU state
+unsigned char COMPLEX_TEST_CODE[] = {
+    // Function prologue - save registers
+    0x55,                       // push rbp
+    0x48, 0x89, 0xE5,           // mov rbp, rsp
+    0x48, 0x83, 0xEC, 0x20,     // sub rsp, 32
+    0x48, 0x89, 0x7D, 0xF8,     // mov [rbp-8], rdi
+    0x48, 0x89, 0x75, 0xF0,     // mov [rbp-16], rsi
+    
+    // Set up diverse register values
+    0x48, 0xB8, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,  // mov rax, 0xEFCDAB8967452301
+    0x48, 0xBB, 0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10,  // mov rbx, 0x1032547698BADCFE
+    0x48, 0xB9, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11,  // mov rcx, 0x1100FFEEDDCCBBAA
+    0x48, 0xBA, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99,  // mov rdx, 0x9988776655443322
+    
+    // Memory operations
+    0x48, 0x89, 0x45, 0xE8,     // mov [rbp-24], rax
+    0x48, 0x8B, 0x5D, 0xE8,     // mov rbx, [rbp-24]
+    
+    // Arithmetic operations
+    0x48, 0x01, 0xD8,           // add rax, rbx
+    0x48, 0x29, 0xC8,           // sub rax, rcx
+    0x48, 0x0F, 0xAF, 0xC2,     // imul rax, rdx
+    
+    // Logical operations
+    0x48, 0x31, 0xDB,           // xor rbx, rbx
+    0x48, 0x09, 0xCB,           // or rbx, rcx
+    0x48, 0x21, 0xD3,           // and rbx, rdx
+    
+    // Stack operations
+    0x50,                       // push rax
+    0x51,                       // push rcx
+    0x5A,                       // pop rdx (was rcx)
+    0x58,                       // pop rax
+    
+    // Conditional operations
+    0x48, 0x39, 0xD8,           // cmp rax, rbx
+    0x7C, 0x04,                 // jl label1
+    0x48, 0xFF, 0xC0,           // inc rax
+    0xEB, 0x02,                 // jmp label2
+    // label1:
+    0x48, 0xFF, 0xC3,           // inc rbx
+    // label2:
+    
+    // More complex memory operations
+    0x48, 0x8D, 0x4D, 0xE0,     // lea rcx, [rbp-32]
+    0x48, 0x89, 0x01,           // mov [rcx], rax
+    0x48, 0x8B, 0x31,           // mov rsi, [rcx]
+    
+    // Function epilogue
+    0x48, 0x83, 0xC4, 0x20,     // add rsp, 32
+    0x5D,                       // pop rbp
+    0xC3                        // ret
+};
+
+void test_advanced_serialization(const char* filename) {
+    printf("\n==== Testing Advanced CPU State Serialization ====\n");
+    
+    // Create a new VM
+    Icicle* vm = icicle_new("x86_64", 0, 0, 0, 0, 0, 0, 0, 0);
+    if (!vm) {
+        printf("Failed to create VM\n");
+        return;
+    }
+    
+    // Map memory for code
+    if (icicle_mem_map(vm, 0x1000, 0x1000, ExecuteReadWrite) != 0) {
+        printf("Failed to map memory\n");
+        icicle_free(vm);
+        return;
+    }
+    
+    // Map memory for stack
+    if (icicle_mem_map(vm, 0x7000, 0x4000, ReadWrite) != 0) {
+        printf("Failed to map stack memory\n");
+        icicle_free(vm);
+        return;
+    }
+    
+    // Write test code
+    if (icicle_mem_write(vm, 0x1000, COMPLEX_TEST_CODE, sizeof(COMPLEX_TEST_CODE)) != 0) {
+        printf("Failed to write code\n");
+        icicle_free(vm);
+        return;
+    }
+    
+    // Setup initial state
+    icicle_set_pc(vm, 0x1000);  // Set PC to start of code
+    icicle_set_sp(vm, 0xA000);  // Set stack pointer
+    
+    // Set initial register values to specific patterns
+    icicle_reg_write(vm, "rax", 0x1111111111111111);
+    icicle_reg_write(vm, "rbx", 0x2222222222222222);
+    icicle_reg_write(vm, "rcx", 0x3333333333333333);
+    icicle_reg_write(vm, "rdx", 0x4444444444444444);
+    icicle_reg_write(vm, "rsi", 0x5555555555555555);
+    icicle_reg_write(vm, "rdi", 0x6666666666666666);
+    icicle_reg_write(vm, "r8",  0x7777777777777777);
+    icicle_reg_write(vm, "r9",  0x8888888888888888);
+    icicle_reg_write(vm, "r10", 0x9999999999999999);
+    icicle_reg_write(vm, "r11", 0xAAAAAAAAAAAAAAAA);
+    icicle_reg_write(vm, "r12", 0xBBBBBBBBBBBBBBBB);
+    icicle_reg_write(vm, "r13", 0xCCCCCCCCCCCCCCCC);
+    icicle_reg_write(vm, "r14", 0xDDDDDDDDDDDDDDDD);
+    icicle_reg_write(vm, "r15", 0xEEEEEEEEEEEEEEEE);
+    
+    // Execute several instructions to build a complex state
+    printf("Executing instructions to build complex state...\n");
+    RunStatus status = icicle_step(vm, 30);
+    if (status != Running && status != InstructionLimit) {
+        printf("WARNING: Execution status: %d\n", status);
+    }
+    
+    // Print the current PC and some registers
+    uint64_t pc_before, rax_before, rbx_before, rcx_before, rdx_before, rsp_before;
+    pc_before = icicle_get_pc(vm);
+    icicle_reg_read(vm, "rax", &rax_before);
+    icicle_reg_read(vm, "rbx", &rbx_before);
+    icicle_reg_read(vm, "rcx", &rcx_before);
+    icicle_reg_read(vm, "rdx", &rdx_before);
+    icicle_reg_read(vm, "rsp", &rsp_before);
+    
+    printf("Before serialization:\n");
+    printf("  PC = 0x%lx\n", pc_before);
+    printf("  RAX = 0x%lx\n", rax_before);
+    printf("  RBX = 0x%lx\n", rbx_before);
+    printf("  RCX = 0x%lx\n", rcx_before);
+    printf("  RDX = 0x%lx\n", rdx_before);
+    printf("  RSP = 0x%lx\n", rsp_before);
+    
+    // Read stack values if we have pushed values
+    if (rsp_before < 0xA000) {
+        size_t stack_size = 0;
+        uint8_t* stack_data = icicle_mem_read(vm, rsp_before, 16, &stack_size);
+        printf("  Stack at RSP (0x%lx):", rsp_before);
+        for (size_t i = 0; i < stack_size; i++) {
+            if (i % 8 == 0) printf("\n    ");
+            printf("%02x ", stack_data[i]);
+        }
+        printf("\n");
+        icicle_free_buffer(stack_data, stack_size);
+    }
+    
+    // Serialize VM state
+    printf("Serializing CPU state to %s...\n", filename);
+    if (icicle_serialize_cpu_state(vm, filename, 1) != 0) {
+        printf("Failed to serialize CPU state\n");
+        icicle_free(vm);
+        return;
+    }
+    printf("Successfully serialized CPU state to %s\n", filename);
+    
+    // Change register values drastically
+    printf("Changing register values to verify restore works...\n");
+    icicle_reg_write(vm, "rax", 0);
+    icicle_reg_write(vm, "rbx", 0);
+    icicle_reg_write(vm, "rcx", 0);
+    icicle_reg_write(vm, "rdx", 0);
+    icicle_set_pc(vm, 0x1000);  // Reset PC
+    icicle_set_sp(vm, 0xA000);  // Reset SP
+    
+    // Deserialize VM state
+    printf("Deserializing CPU state from %s...\n", filename);
+    if (icicle_deserialize_cpu_state(vm, filename, 1) != 0) {
+        printf("Failed to deserialize CPU state\n");
+        icicle_free(vm);
+        return;
+    }
+    printf("Successfully deserialized CPU state from %s\n", filename);
+    
+    // Verify registers are restored
+    uint64_t pc_after, rax_after, rbx_after, rcx_after, rdx_after, rsp_after;
+    pc_after = icicle_get_pc(vm);
+    icicle_reg_read(vm, "rax", &rax_after);
+    icicle_reg_read(vm, "rbx", &rbx_after);
+    icicle_reg_read(vm, "rcx", &rcx_after);
+    icicle_reg_read(vm, "rdx", &rdx_after);
+    icicle_reg_read(vm, "rsp", &rsp_after);
+    
+    printf("After deserialization:\n");
+    printf("  PC = 0x%lx\n", pc_after);
+    printf("  RAX = 0x%lx\n", rax_after);
+    printf("  RBX = 0x%lx\n", rbx_after);
+    printf("  RCX = 0x%lx\n", rcx_after);
+    printf("  RDX = 0x%lx\n", rdx_after);
+    printf("  RSP = 0x%lx\n", rsp_after);
+    
+    // Read stack values after deserialization
+    if (rsp_after < 0xA000) {
+        size_t stack_size = 0;
+        uint8_t* stack_data = icicle_mem_read(vm, rsp_after, 16, &stack_size);
+        printf("  Stack at RSP (0x%lx):", rsp_after);
+        for (size_t i = 0; i < stack_size; i++) {
+            if (i % 8 == 0) printf("\n    ");
+            printf("%02x ", stack_data[i]);
+        }
+        printf("\n");
+        icicle_free_buffer(stack_data, stack_size);
+    }
+    
+    // Verify everything matches
+    int success = 1;
+    if (pc_before != pc_after) {
+        printf("ERROR: PC mismatch: 0x%lx vs 0x%lx\n", pc_before, pc_after);
+        success = 0;
+    }
+    if (rax_before != rax_after) {
+        printf("ERROR: RAX mismatch: 0x%lx vs 0x%lx\n", rax_before, rax_after);
+        success = 0;
+    }
+    if (rbx_before != rbx_after) {
+        printf("ERROR: RBX mismatch: 0x%lx vs 0x%lx\n", rbx_before, rbx_after);
+        success = 0;
+    }
+    if (rcx_before != rcx_after) {
+        printf("ERROR: RCX mismatch: 0x%lx vs 0x%lx\n", rcx_before, rcx_after);
+        success = 0;
+    }
+    if (rdx_before != rdx_after) {
+        printf("ERROR: RDX mismatch: 0x%lx vs 0x%lx\n", rdx_before, rdx_after);
+        success = 0;
+    }
+    if (rsp_before != rsp_after) {
+        printf("ERROR: RSP mismatch: 0x%lx vs 0x%lx\n", rsp_before, rsp_after);
+        success = 0;
+    }
+    
+    // Test continued execution
+    printf("Testing continued execution after deserialization...\n");
+    RunStatus continue_status = icicle_step(vm, 10);
+    printf("Execution status after resuming: %d\n", continue_status);
+    
+    // Check final register values
+    uint64_t final_pc, final_rax;
+    final_pc = icicle_get_pc(vm);
+    icicle_reg_read(vm, "rax", &final_rax);
+    printf("  Final PC: 0x%lx\n", final_pc);
+    printf("  Final RAX: 0x%lx\n", final_rax);
+    
+    if (success) {
+        printf("Advanced serialization test PASSED!\n");
+    } else {
+        printf("Advanced serialization test FAILED!\n");
+    }
+    
+    icicle_free(vm);
+}
+
+void test_memory_serialization(const char* filename) {
+    printf("\n==== Testing Memory State Serialization ====\n");
+    
+    // Create a new VM
+    Icicle* vm = icicle_new("x86_64", 0, 0, 0, 0, 0, 0, 0, 0);
+    if (!vm) {
+        printf("Failed to create VM\n");
+        return;
+    }
+    
+    // Map a few memory regions with different permissions
+    printf("Mapping memory regions with different permissions...\n");
+    
+    // Code section (R+X)
+    if (icicle_mem_map(vm, 0x1000, 0x1000, ExecuteRead) != 0) {
+        printf("Failed to map code memory\n");
+        icicle_free(vm);
+        return;
+    }
+    
+    // Data section (R+W)
+    if (icicle_mem_map(vm, 0x2000, 0x1000, ReadWrite) != 0) {
+        printf("Failed to map data memory\n");
+        icicle_free(vm);
+        return;
+    }
+    
+    // Read-only section
+    if (icicle_mem_map(vm, 0x3000, 0x1000, ReadOnly) != 0) {
+        printf("Failed to map read-only memory\n");
+        icicle_free(vm);
+        return;
+    }
+    
+    // Stack section (R+W)
+    if (icicle_mem_map(vm, 0x7000, 0x4000, ReadWrite) != 0) {
+        printf("Failed to map stack memory\n");
+        icicle_free(vm);
+        return;
+    }
+    
+    // Write different patterns to each region
+    unsigned char code_bytes[] = {
+        0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00,  // mov rax, 1
+        0x48, 0xC7, 0xC7, 0x02, 0x00, 0x00, 0x00,  // mov rdi, 2
+        0x48, 0x01, 0xF8,                          // add rax, rdi
+        0xC3                                        // ret
+    };
+    
+    unsigned char data_bytes[256];
+    for (int i = 0; i < 256; i++) {
+        data_bytes[i] = (unsigned char)i;
+    }
+    
+    unsigned char rodata_bytes[256];
+    for (int i = 0; i < 256; i++) {
+        rodata_bytes[i] = (unsigned char)(255 - i);
+    }
+    
+    // Write to the memory regions
+    printf("Writing data to memory regions...\n");
+    if (icicle_mem_write(vm, 0x1000, code_bytes, sizeof(code_bytes)) != 0) {
+        printf("Failed to write code\n");
+        icicle_free(vm);
+        return;
+    }
+    
+    if (icicle_mem_write(vm, 0x2000, data_bytes, sizeof(data_bytes)) != 0) {
+        printf("Failed to write data\n");
+        icicle_free(vm);
+        return;
+    }
+    
+    if (icicle_mem_write(vm, 0x3000, rodata_bytes, sizeof(rodata_bytes)) != 0) {
+        printf("Failed to write read-only data\n");
+        icicle_free(vm);
+        return;
+    }
+    
+    // Setup some CPU state too
+    icicle_set_pc(vm, 0x1000);  // Set PC to start of code
+    icicle_set_sp(vm, 0x9000);  // Set stack pointer
+    
+    // Set a few register values
+    icicle_reg_write(vm, "rax", 0x1111111111111111);
+    icicle_reg_write(vm, "rbx", 0x2222222222222222);
+    icicle_reg_write(vm, "rcx", 0x3333333333333333);
+    
+    // Get memory regions before serialization
+    size_t region_count_before = 0;
+    MemRegionInfo* regions_before = icicle_mem_list_mapped(vm, &region_count_before);
+    
+    printf("Memory regions before serialization:\n");
+    for (size_t i = 0; i < region_count_before; i++) {
+        printf("  Region %zu: 0x%lx - 0x%lx, protection: %d\n",
+               i,
+               regions_before[i].address,
+               regions_before[i].address + regions_before[i].size - 1,
+               regions_before[i].protection);
+        
+        // Read first 16 bytes from each region
+        size_t read_size = 0;
+        unsigned char* memory = icicle_mem_read(vm, regions_before[i].address, 16, &read_size);
+        
+        if (memory && read_size > 0) {
+            printf("    First %zu bytes:", read_size);
+            for (size_t j = 0; j < read_size; j++) {
+                if (j % 8 == 0) printf("\n      ");
+                printf("%02x ", memory[j]);
+            }
+            printf("\n");
+            icicle_free_buffer(memory, read_size);
+        }
+    }
+    
+    // Free the region list
+    icicle_mem_list_mapped_free(regions_before, region_count_before);
+    
+    // Get serialized size estimate with memory included
+    size_t serialized_size = icicle_get_vm_serialized_size(vm);
+    printf("Estimated serialized size with memory: %zu bytes\n", serialized_size);
+    
+    // Serialize VM state with memory
+    printf("Serializing VM state with memory to %s...\n", filename);
+    if (icicle_serialize_vm_state(vm, filename, true, 1) != 0) {
+        printf("Failed to serialize VM state with memory\n");
+        icicle_free(vm);
+        return;
+    }
+    printf("Successfully serialized VM state to %s\n", filename);
+    
+    // Create a new VM to restore the state into
+    printf("Creating a new VM for deserialization...\n");
+    Icicle* new_vm = icicle_new("x86_64", 0, 0, 0, 0, 0, 0, 0, 0);
+    if (!new_vm) {
+        printf("Failed to create new VM\n");
+        icicle_free(vm);
+        return;
+    }
+    
+    // Deserialize VM state with memory
+    printf("Deserializing VM state with memory from %s...\n", filename);
+    if (icicle_deserialize_vm_state(new_vm, filename, true, 1) != 0) {
+        printf("Failed to deserialize VM state with memory\n");
+        icicle_free(vm);
+        icicle_free(new_vm);
+        return;
+    }
+    printf("Successfully deserialized VM state from %s\n", filename);
+    
+    // Get memory regions after deserialization
+    size_t region_count_after = 0;
+    MemRegionInfo* regions_after = icicle_mem_list_mapped(new_vm, &region_count_after);
+    
+    printf("Memory regions after deserialization:\n");
+    for (size_t i = 0; i < region_count_after; i++) {
+        printf("  Region %zu: 0x%lx - 0x%lx, protection: %d\n",
+               i,
+               regions_after[i].address,
+               regions_after[i].address + regions_after[i].size - 1,
+               regions_after[i].protection);
+        
+        // Read first 16 bytes from each region
+        size_t read_size = 0;
+        unsigned char* memory = icicle_mem_read(new_vm, regions_after[i].address, 16, &read_size);
+        
+        if (memory && read_size > 0) {
+            printf("    First %zu bytes:", read_size);
+            for (size_t j = 0; j < read_size; j++) {
+                if (j % 8 == 0) printf("\n      ");
+                printf("%02x ", memory[j]);
+            }
+            printf("\n");
+            icicle_free_buffer(memory, read_size);
+        }
+    }
+    
+    // Free the region list
+    icicle_mem_list_mapped_free(regions_after, region_count_after);
+    
+    // Verify that regions match
+    printf("Verifying memory regions...\n");
+    
+    int success = 1;
+    if (region_count_before != region_count_after) {
+        printf("ERROR: Region count mismatch: %zu vs %zu\n", region_count_before, region_count_after);
+        success = 0;
+    } else {
+        // Simple check: Read a few bytes from each region in both VMs and compare
+        for (size_t addr = 0x1000; addr <= 0x3000; addr += 0x1000) {
+            size_t size1 = 0, size2 = 0;
+            unsigned char* data1 = icicle_mem_read(vm, addr, 16, &size1);
+            unsigned char* data2 = icicle_mem_read(new_vm, addr, 16, &size2);
+            
+            if (size1 != size2) {
+                printf("ERROR: Read size mismatch for address 0x%lx: %zu vs %zu\n", 
+                       addr, size1, size2);
+                success = 0;
+            } else if (memcmp(data1, data2, size1) != 0) {
+                printf("ERROR: Memory content mismatch for address 0x%lx\n", addr);
+                printf("  Original data:");
+                for (size_t i = 0; i < size1; i++) {
+                    if (i % 8 == 0) printf("\n    ");
+                    printf("%02x ", data1[i]);
+                }
+                printf("\n  Restored data:");
+                for (size_t i = 0; i < size2; i++) {
+                    if (i % 8 == 0) printf("\n    ");
+                    printf("%02x ", data2[i]);
+                }
+                printf("\n");
+                success = 0;
+            }
+            
+            if (data1) icicle_free_buffer(data1, size1);
+            if (data2) icicle_free_buffer(data2, size2);
+        }
+    }
+    
+    // Verify that register values match
+    uint64_t pc1, pc2, rax1, rax2, rbx1, rbx2, rcx1, rcx2, rsp1, rsp2;
+    
+    pc1 = icicle_get_pc(vm);
+    pc2 = icicle_get_pc(new_vm);
+    icicle_reg_read(vm, "rax", &rax1);
+    icicle_reg_read(new_vm, "rax", &rax2);
+    icicle_reg_read(vm, "rbx", &rbx1);
+    icicle_reg_read(new_vm, "rbx", &rbx2);
+    icicle_reg_read(vm, "rcx", &rcx1);
+    icicle_reg_read(new_vm, "rcx", &rcx2);
+    rsp1 = icicle_get_sp(vm);
+    rsp2 = icicle_get_sp(new_vm);
+    
+    printf("Register comparison:\n");
+    printf("  PC:  0x%lx vs 0x%lx %s\n", pc1, pc2, pc1 == pc2 ? "✓" : "✗");
+    printf("  RAX: 0x%lx vs 0x%lx %s\n", rax1, rax2, rax1 == rax2 ? "✓" : "✗");
+    printf("  RBX: 0x%lx vs 0x%lx %s\n", rbx1, rbx2, rbx1 == rbx2 ? "✓" : "✗");
+    printf("  RCX: 0x%lx vs 0x%lx %s\n", rcx1, rcx2, rcx1 == rcx2 ? "✓" : "✗");
+    printf("  RSP: 0x%lx vs 0x%lx %s\n", rsp1, rsp2, rsp1 == rsp2 ? "✓" : "✗");
+    
+    if (pc1 != pc2 || rax1 != rax2 || rbx1 != rbx2 || rcx1 != rcx2 || rsp1 != rsp2) {
+        success = 0;
+    }
+    
+    // Test execution in the restored VM
+    printf("Testing execution in restored VM...\n");
+    RunStatus status = icicle_step(new_vm, 5);
+    printf("Step status: %d\n", status);
+    
+    if (success) {
+        printf("Memory serialization test PASSED!\n");
+    } else {
+        printf("Memory serialization test FAILED!\n");
+    }
+    
+    icicle_free(vm);
+    icicle_free(new_vm);
+}
+
 int main() {
     setenv("GHIDRA_SRC", "../ghidra", 1);
     test_register_utilities();
@@ -2407,6 +2920,8 @@ int main() {
     test_exception_code_mapping();
     test_breakpoint_listing();
     test_memory_region_listing();
+    test_advanced_serialization("advanced_state.bin");
+    test_memory_serialization("full_vm_state.bin");
     printf("\nAll tests completed.\n");
     return 0;
 }
