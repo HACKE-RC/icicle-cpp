@@ -111,6 +111,7 @@ int verify_values(Icicle* vm, const char* stage) {
 }
 
 int main() {
+    setenv("GHIDRA_SRC", "../ghidra", 0);
     printf("Initializing VM with x86_64 architecture...\n");
     // Initialize VM with x86_64 architecture
     Icicle* vm = icicle_new("x86_64", false, false, false, false, false, false, false, false);

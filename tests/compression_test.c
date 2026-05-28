@@ -265,6 +265,7 @@ void test_compression_levels() {
 }
 
 int main() {
+    setenv("GHIDRA_SRC", "../ghidra", 0);
     test_compression_levels();
     return 0;
 } 
