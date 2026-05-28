@@ -363,7 +363,7 @@ pub extern "C" fn icicle_reg_read(vm_ptr: *mut Icicle, reg_name: *const c_char, 
     };
     match reg_find(vm, name) {
         Ok(reg) => {
-            let value = vm.vm.cpu.read_reg(reg.var);
+            let value = vm.vm.cpu.read_reg(reg.get_raw_var());
             unsafe { *out_value = value; }
             0
         }
@@ -384,10 +384,10 @@ pub extern "C" fn icicle_reg_write(vm_ptr: *mut Icicle, reg_name: *const c_char,
     };
     match reg_find(vm, name) {
         Ok(reg) => {
-            if reg.var == vm.vm.cpu.arch.reg_pc {
+            if reg.get_raw_var() == vm.vm.cpu.arch.reg_pc {
                 vm.vm.cpu.write_pc(value);
             } else {
-                vm.vm.cpu.write_reg(reg.var, value);
+                vm.vm.cpu.write_reg(reg.get_raw_var(), value);
             }
             0
         }
@@ -428,7 +428,7 @@ pub extern "C" fn icicle_reg_list(vm_ptr: *mut Icicle, out_count: *mut usize) ->
         regs_vec.push(RegInfo {
             name: cstring.into_raw(),
             offset: reg.offset,
-            size: reg.var.size,
+            size: reg.get_raw_var().size,
         });
     }
     unsafe {
@@ -466,7 +466,7 @@ pub extern "C" fn icicle_reg_size(vm_ptr: *mut Icicle, reg_name: *const c_char) 
         Err(_) => return -1,
     };
     match reg_find(vm, name) {
-        Ok(reg) => reg.var.size as c_int,
+        Ok(reg) => reg.get_raw_var().size as c_int,
         Err(_) => -1,
     }
 }
@@ -1242,7 +1242,7 @@ pub extern "C" fn icicle_debug_log_regs(
         // Collect register values
         for reg_name in &rust_reg_names {
             let var = match cpu.arch.sleigh.get_reg(reg_name.to_str().unwrap_or("")) {
-                Some(reg) => reg.var,
+                Some(reg) => reg.get_raw_var(),
                 None => continue,
             };
             
@@ -1270,8 +1270,10 @@ pub extern "C" fn icicle_debug_log_regs(
     
     // Add execution hook to the VM
     let internal_hook_id = vm.vm.cpu.add_hook(Box::new(hook_fn.clone()));
-    // Register to activate the hook at specific address
-    icicle_vm::injector::register_block_hook_injector(&mut vm.vm, address, address + 1, internal_hook_id);
+    // Register to activate the hook at the specific instruction address.
+    // Instruction-level injection is more precise than block-level for
+    // single-address hooks, especially when the address is a jmp target.
+    icicle_vm::injector::register_instruction_hook_injector(&mut vm.vm, vec![address], internal_hook_id);
     
     // Store for future reference
     vm.execution_hooks.insert(hook_id, Box::new(hook_fn));
@@ -1846,15 +1848,15 @@ pub extern "C" fn icicle_reg_read_bytes(
 
     match reg_find(vm, name) {
         Ok(reg) => {
-            let reg_size = reg.var.size as usize;
+            let reg_size = reg.get_raw_var().size as usize;
             // Ensure the provided buffer is large enough
             if buffer_size < reg_size {
                 return -1; // Buffer too small
             }
 
             // Read the raw bytes directly from the Regs storage
-            if let Some(bytes) = vm.vm.cpu.regs.get(reg.var) {
-                 // Check length just in case, though reg.var.size should be correct
+            if let Some(bytes) = vm.vm.cpu.regs.get(reg.get_raw_var()) {
+                 // Check length just in case, though reg.get_raw_var().size should be correct
                 if bytes.len() != reg_size {
                      eprintln!("Warning: Register size mismatch for {}", name);
                      return -1;
@@ -1894,7 +1896,7 @@ pub extern "C" fn icicle_reg_write_bytes(
 
     match reg_find(vm, name) {
         Ok(reg) => {
-            let reg_size = reg.var.size as usize;
+            let reg_size = reg.get_raw_var().size as usize;
             // Ensure the provided buffer size matches the register size
             if buffer_size != reg_size {
                 return -1; // Buffer size mismatch
@@ -1904,7 +1906,7 @@ pub extern "C" fn icicle_reg_write_bytes(
             let input_bytes = unsafe { std::slice::from_raw_parts(buffer, buffer_size) };
             
             // Get mutable access to the register's bytes
-            if let Some(reg_bytes) = vm.vm.cpu.regs.get_mut(reg.var) {
+            if let Some(reg_bytes) = vm.vm.cpu.regs.get_mut(reg.get_raw_var()) {
                 // Check length just in case
                 if reg_bytes.len() != reg_size {
                     eprintln!("Warning: Register size mismatch for {}", name);

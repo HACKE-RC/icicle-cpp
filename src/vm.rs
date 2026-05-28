@@ -75,7 +75,7 @@ impl Icicle {
         let mut config = icicle_vm::cpu::Config::from_target_triple(
             format!("{}-none", architecture).as_str(),
         );
-        if config.triple.architecture == target_lexicon::Architecture::Unknown {
+        if config.triple.architecture == Architecture::Unknown {
             return Err(format!("Unknown architecture: {}", architecture));
         }
 
@@ -100,7 +100,7 @@ impl Icicle {
         // Special handling for x86 flags
         match config.triple.architecture {
             Architecture::X86_32(_) | Architecture::X86_64 | Architecture::X86_64h => {
-                let eflags = sleigh.get_reg("eflags").unwrap().var;
+                let eflags = sleigh.get_reg("eflags").unwrap().get_raw_var();
                 let reg_handler = X86FlagsRegHandler { eflags };
                 vm.cpu.add_reg_handler(eflags.id, Box::new(reg_handler));
             }
@@ -250,16 +250,16 @@ impl Icicle {
                         let cpu = &mut self.vm.cpu;
                         let syscall_nr = cpu.arch.sleigh
                             .get_reg("RAX")
-                            .map(|r| r.var)
+                            .and_then(|r| r.get_var())
                             .map(|v| cpu.read_reg(v))
                             .unwrap_or(u64::MAX);
                         let args = SyscallArgs {
-                            arg0: cpu.arch.sleigh.get_reg("RDI").map(|r| r.var).map(|v| cpu.read_reg(v)).unwrap_or(0),
-                            arg1: cpu.arch.sleigh.get_reg("RSI").map(|r| r.var).map(|v| cpu.read_reg(v)).unwrap_or(0),
-                            arg2: cpu.arch.sleigh.get_reg("RDX").map(|r| r.var).map(|v| cpu.read_reg(v)).unwrap_or(0),
-                            arg3: cpu.arch.sleigh.get_reg("R10").map(|r| r.var).map(|v| cpu.read_reg(v)).unwrap_or(0),
-                            arg4: cpu.arch.sleigh.get_reg("R8").map(|r| r.var).map(|v| cpu.read_reg(v)).unwrap_or(0),
-                            arg5: cpu.arch.sleigh.get_reg("R9").map(|r| r.var).map(|v| cpu.read_reg(v)).unwrap_or(0),
+                            arg0: cpu.arch.sleigh.get_reg("RDI").and_then(|r| r.get_var()).map(|v| cpu.read_reg(v)).unwrap_or(0),
+                            arg1: cpu.arch.sleigh.get_reg("RSI").and_then(|r| r.get_var()).map(|v| cpu.read_reg(v)).unwrap_or(0),
+                            arg2: cpu.arch.sleigh.get_reg("RDX").and_then(|r| r.get_var()).map(|v| cpu.read_reg(v)).unwrap_or(0),
+                            arg3: cpu.arch.sleigh.get_reg("R10").and_then(|r| r.get_var()).map(|v| cpu.read_reg(v)).unwrap_or(0),
+                            arg4: cpu.arch.sleigh.get_reg("R8").and_then(|r| r.get_var()).map(|v| cpu.read_reg(v)).unwrap_or(0),
+                            arg5: cpu.arch.sleigh.get_reg("R9").and_then(|r| r.get_var()).map(|v| cpu.read_reg(v)).unwrap_or(0),
                         };
 
                         match (callback)(data, syscall_nr, &args as *const SyscallArgs) {
