@@ -246,6 +246,15 @@ impl Icicle {
                     }
 
                     if is_syscall && self.syscall_callback.is_some() {
+                        // The syscall callback path below is x86-64-specific:
+                        // it reads RAX, RDI, RSI, etc. and advances PC by 2
+                        // (the length of `syscall` on x86-64).  On other
+                        // architectures the syscall exception fires but the
+                        // handler cannot safely interpret it, so we let it
+                        // propagate as an unhandled exception.
+                        if self.architecture != "x86_64" {
+                            return RunStatus::UnhandledException;
+                        }
                         let (callback, data) = *self.syscall_callback.as_ref().unwrap();
                         let cpu = &mut self.vm.cpu;
                         let syscall_nr = cpu.arch.sleigh

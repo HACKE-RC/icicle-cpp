@@ -166,10 +166,12 @@ pub extern "C" fn icicle_remove_hook(
     }
 }
 
-/// Legacy function to maintain compatibility with existing code
+/// Legacy function to maintain compatibility with existing code.
+/// The hook_id parameter is ignored — there is exactly one syscall hook
+/// (ID 2) and this always removes it.
 #[no_mangle]
-pub extern "C" fn icicle_remove_syscall_hook(vm_ptr: *mut Icicle, hook_id: u32) -> c_int {
-    icicle_remove_hook(vm_ptr, hook_id)
+pub extern "C" fn icicle_remove_syscall_hook(vm_ptr: *mut Icicle, _hook_id: u32) -> c_int {
+    icicle_remove_hook(vm_ptr, 2)
 }
 
 #[no_mangle]
@@ -1485,18 +1487,17 @@ pub extern "C" fn icicle_set_coverage_mode(
     }
     let vm = unsafe { &mut *vm_ptr };
     
-    // Clear existing coverage data
-    vm.coverage_map.clear();
-    
-    // Initialize a coverage map based on the mode
-    // For block/edge coverage modes, we use a bit map
-    // For count modes, we use a counter map
+    // Resize the existing coverage map in-place rather than allocating a new
+    // Vec. This avoids invalidating the raw pointer held by any still-registered
+    // coverage hooks (a known upstream limitation: hooks cannot be removed from
+    // the core VM).  If the size stays the same, the internal buffer is reused
+    // and existing hooks continue to write to valid memory.
     let size = match mode {
-        CoverageMode::Blocks | CoverageMode::Edges => 4096, // 32K bits
-        CoverageMode::BlockCounts | CoverageMode::EdgeCounts => 4096 * 2, // 4K counters
+        CoverageMode::Blocks | CoverageMode::Edges => 4096,
+        CoverageMode::BlockCounts | CoverageMode::EdgeCounts => 4096 * 2,
     };
-    
-    vm.coverage_map = vec![0; size];
+    vm.coverage_map.clear();
+    vm.coverage_map.resize(size, 0);
     vm.coverage_mode = mode;
     
     // If we already have an execution hook, remove it
@@ -1637,7 +1638,7 @@ pub extern "C" fn icicle_enable_instrumentation(
     start_addr: u64,
     end_addr: u64,
 ) -> c_int {
-    if vm_ptr.is_null() || start_addr >= end_addr {
+    if vm_ptr.is_null() || start_addr > end_addr {
         return -1;
     }
     let vm = unsafe { &mut *vm_ptr };
@@ -2449,8 +2450,6 @@ pub extern "C" fn icicle_get_serialized_size(vm_ptr: *mut Icicle) -> usize {
     if vm_ptr.is_null() {
         return 0;
     }
-    
-    let _vm = unsafe { &mut *vm_ptr };
     
     let vm = unsafe { &mut *vm_ptr };
     match SerializableVmState::from_vm(vm, false).serialize() {
