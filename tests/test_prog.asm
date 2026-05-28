@@ -3,5 +3,4 @@ bits 64
 global _start
 _start:
     mov rax, 0xdeadbeef
-    ret
-
+    jmp $
