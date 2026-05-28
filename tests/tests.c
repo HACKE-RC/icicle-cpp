@@ -52,6 +52,7 @@ void test_register_utilities() {
     
     // Test reg_list.
     size_t reg_count = 0;
+    (void)reg_count; /* kept for the commented block below */
 /*
   RegInfo* regs = icicle_reg_list(vm, &reg_count);
     if (regs) {
@@ -360,7 +361,7 @@ void test_x86_64() {
     }
 
     icicle_set_pc(vm, 0x1000);
-    RunStatus status = icicle_step(vm, 1);  // Step once to execute the mov instruction.
+    (void)icicle_step(vm, 1);  // Execute the mov instruction.
 
     uint64_t rax = 0;
     if (icicle_reg_read(vm, "rax", &rax) == 0) {
@@ -410,7 +411,7 @@ void test_aarch64() {
     }
 
     icicle_set_pc(vm, 0x1000);
-    RunStatus status = icicle_step(vm, 1);  // Step once to execute the movz instruction.
+    (void)icicle_step(vm, 1);  // Execute the movz instruction.
 
 
     uint64_t x0 = 0;
@@ -462,7 +463,7 @@ void test_riscv64() {
     }
 
     icicle_set_pc(vm, 0x1000);
-    RunStatus status = icicle_step(vm, 1);  // Step once to execute addi.
+    (void)icicle_step(vm, 1);  // Execute addi.
 
 
     uint64_t a0 = 0;
@@ -970,7 +971,6 @@ void test_reversible_execution() {
         icicle_free(vm);
         return;
     }
-    uint64_t initial_pc = icicle_get_pc(vm);
     uint64_t initial_icount = icicle_get_icount(vm);
     uint64_t initial_rax = 0; // RAX is initially undefined, but xor sets it to 0
     icicle_reg_read(vm, "rax", &initial_rax); 
@@ -1978,8 +1978,8 @@ void test_large_register_read() {
 
     // Set PC and execute the instruction
     icicle_set_pc(vm, 0x1000);
-    RunStatus status = icicle_step(vm, 1); // Execute movaps
-    
+    (void)icicle_step(vm, 1); // Execute movaps
+
     // Now, read xmm0 using icicle_reg_read_bytes
     // Declare a buffer for the raw bytes
     uint8_t xmm0_buffer[16];
