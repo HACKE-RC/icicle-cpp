@@ -163,12 +163,11 @@ pub extern "C" fn icicle_remove_execution_hook(
 
     // Remove the hook from our tracking map.
     // The actual hook closure will be dropped when removed from the map.
-    // We cannot remove it from the core VM's hook list.
+    // Note: we cannot remove a hook from the core VM's hook list (the upstream
+    // API doesn't expose hook-removal), so the hook stays active in the VM but
+    // its closure is dropped, making it a no-op.
     vm.execution_hooks.remove(&hook_id);
-    // Maybe clear TLB? Unsure if needed for execution hooks.
-    // vm.vm.cpu.mem.tlb.clear(); 
-
-    0 // Return success
+    0
 }
 
 /// Removes a previously registered hook (Violation or Syscall ONLY)
@@ -505,15 +504,6 @@ impl Icicle {
 
         loop {
             match self.vm.run() {
-                VmExit::Running => return RunStatus::Running,
-                VmExit::InstructionLimit => return RunStatus::InstructionLimit,
-                VmExit::Breakpoint => return RunStatus::Breakpoint,
-                VmExit::Interrupted => return RunStatus::Interrupted,
-                VmExit::Halt => return RunStatus::Halt,
-                VmExit::Killed => return RunStatus::Killed,
-                VmExit::Deadlock => return RunStatus::Deadlock,
-                VmExit::OutOfMemory => return RunStatus::OutOfMemory,
-                VmExit::Unimplemented => return RunStatus::Unimplemented,
                 VmExit::UnhandledException(_) => {
                     let code = self.vm.cpu.exception.code;
                     let value = self.vm.cpu.exception.value;
@@ -601,6 +591,7 @@ impl Icicle {
 
                     return RunStatus::UnhandledException;
                 }
+                other => return vm_exit_to_run_status(other),
             }
         }
     }
@@ -646,43 +637,35 @@ impl Icicle {
     /// Steps backward in execution by the specified number of instructions.
     /// Returns None if there are no snapshots to step back to.
     pub fn step_back(&mut self, count: u64) -> Option<RunStatus> {
-        // Map VmExit to RunStatus if step_back succeeds
-        self.vm.step_back(count).map(|exit| match exit {
-            VmExit::Running => RunStatus::Running,
-            VmExit::InstructionLimit => RunStatus::InstructionLimit,
-            VmExit::Breakpoint => RunStatus::Breakpoint,
-            VmExit::Interrupted => RunStatus::Interrupted,
-            VmExit::Halt => RunStatus::Halt,
-            VmExit::Killed => RunStatus::Killed,
-            VmExit::Deadlock => RunStatus::Deadlock,
-            VmExit::OutOfMemory => RunStatus::OutOfMemory,
-            VmExit::Unimplemented => RunStatus::Unimplemented,
-            VmExit::UnhandledException(_) => RunStatus::UnhandledException,
-        })
+        self.vm.step_back(count).map(vm_exit_to_run_status)
     }
 
     /// Goes to a specific instruction count if snapshots are available.
     /// Returns None if there are no snapshots that can reach the specified instruction count.
     pub fn goto_icount(&mut self, target_icount: u64) -> Option<RunStatus> {
-        // Map VmExit to RunStatus if goto_icount succeeds
-        self.vm.goto_icount(target_icount).map(|exit| match exit {
-            VmExit::Running => RunStatus::Running,
-            VmExit::InstructionLimit => RunStatus::InstructionLimit,
-            VmExit::Breakpoint => RunStatus::Breakpoint,
-            VmExit::Interrupted => RunStatus::Interrupted,
-            VmExit::Halt => RunStatus::Halt,
-            VmExit::Killed => RunStatus::Killed,
-            VmExit::Deadlock => RunStatus::Deadlock,
-            VmExit::OutOfMemory => RunStatus::OutOfMemory,
-            VmExit::Unimplemented => RunStatus::Unimplemented,
-            VmExit::UnhandledException(_) => RunStatus::UnhandledException,
-        })
+        self.vm.goto_icount(target_icount).map(vm_exit_to_run_status)
     }
 
     /// Saves a snapshot at the current execution state.
     /// Snapshots are required for step_back and goto_icount functionality.
     pub fn save_snapshot(&mut self) {
         self.vm.save_snapshot();
+    }
+}
+
+/// Map a core VmExit to the C-facing RunStatus enum.
+fn vm_exit_to_run_status(exit: VmExit) -> RunStatus {
+    match exit {
+        VmExit::Running => RunStatus::Running,
+        VmExit::InstructionLimit => RunStatus::InstructionLimit,
+        VmExit::Breakpoint => RunStatus::Breakpoint,
+        VmExit::Interrupted => RunStatus::Interrupted,
+        VmExit::Halt => RunStatus::Halt,
+        VmExit::Killed => RunStatus::Killed,
+        VmExit::Deadlock => RunStatus::Deadlock,
+        VmExit::OutOfMemory => RunStatus::OutOfMemory,
+        VmExit::Unimplemented => RunStatus::Unimplemented,
+        VmExit::UnhandledException(_) => RunStatus::UnhandledException,
     }
 }
 
@@ -2648,50 +2631,47 @@ impl SerializableVmState {
     // Magic signature for compressed data
     const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD]; // Standard zstd magic number
     
-    // Create a serializable state from CPU and memory
-    fn from_vm(vm: &mut Icicle) -> Self {
-        // Capture register data as a raw byte image of the Regs struct so we can restore
-        // the entire register file in one shot.
-        let regs_data: Vec<u8> = {
-            let cpu = &vm.vm.cpu;
-            let regs = cpu.regs.clone();
-            // SAFETY: Regs is repr(C) / POD-like; we transmute its byte representation
-            // to a Vec<u8>. The same Regs layout must be used at deserialize time.
-            unsafe {
-                std::slice::from_raw_parts(
-                    &regs as *const Regs as *const u8,
-                    std::mem::size_of::<Regs>(),
-                ).to_vec()
-            }
+    // Capture the CPU-only portion of the VM state (no memory touched).
+    fn cpu_state_from_vm(vm: &Icicle) -> (Vec<u8>, Vec<(u64, u64)>, u32, u64, u64) {
+        let cpu = &vm.vm.cpu;
+        let regs = cpu.regs.clone();
+        // SAFETY: Regs is repr(C) / POD-like; we transmute its byte representation
+        // to a Vec<u8>. The same Regs layout must be used at deserialize time.
+        let regs_data = unsafe {
+            std::slice::from_raw_parts(
+                &regs as *const Regs as *const u8,
+                std::mem::size_of::<Regs>(),
+            ).to_vec()
         };
-
-        let (shadow_stack_entries, exception_code, exception_value, icount) = {
-            let cpu = &vm.vm.cpu;
-            let shadow = if cpu.shadow_stack.depth() > 0 {
-                cpu.shadow_stack
-                    .as_slice()
-                    .iter()
-                    .map(|entry| (entry.addr, entry.block))
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            (shadow, cpu.exception.code, cpu.exception.value, cpu.icount)
+        let shadow_stack_entries = if cpu.shadow_stack.depth() > 0 {
+            cpu.shadow_stack
+                .as_slice()
+                .iter()
+                .map(|entry| (entry.addr, entry.block))
+                .collect()
+        } else {
+            Vec::new()
         };
+        (
+            regs_data,
+            shadow_stack_entries,
+            cpu.exception.code,
+            cpu.exception.value,
+            cpu.icount,
+        )
+    }
 
-        // Collect mapped regions and their contents.
+    // Collect mapped regions and their contents for serialization.
+    fn collect_memory_regions(vm: &mut Icicle) -> Vec<SerializedMemoryRegion> {
         let mut memory_regions = Vec::new();
         let mut region_count: usize = 0;
         let regions_ptr = icicle_mem_list_mapped(vm, &mut region_count);
 
         if !regions_ptr.is_null() && region_count > 0 {
-            // SAFETY: we just received this pointer/count back from
-            // icicle_mem_list_mapped, which guarantees the slice is valid.
             let regions = unsafe { std::slice::from_raw_parts(regions_ptr, region_count) };
+            const MAX_REGION_SIZE: u64 = 100 * 1024 * 1024;
 
             for region in regions {
-                // Cap per-region serialization to avoid runaway memory use.
-                const MAX_REGION_SIZE: u64 = 100 * 1024 * 1024;
                 if region.size > MAX_REGION_SIZE {
                     tracing::warn!(
                         "Skipping very large memory region at 0x{:x} (size: {} bytes)",
@@ -2705,7 +2685,6 @@ impl SerializableVmState {
                 let content_ptr = icicle_mem_read(vm, region.address, size, &mut content_size);
 
                 let content = if !content_ptr.is_null() && content_size > 0 {
-                    // SAFETY: icicle_mem_read returns a buffer of exactly content_size bytes.
                     let bytes = unsafe { std::slice::from_raw_parts(content_ptr, content_size).to_vec() };
                     icicle_free_buffer(content_ptr, content_size);
                     bytes
@@ -2723,6 +2702,19 @@ impl SerializableVmState {
 
             icicle_mem_list_mapped_free(regions_ptr, region_count);
         }
+
+        memory_regions
+    }
+
+    // Build the full state (CPU + optionally memory).
+    fn from_vm(vm: &mut Icicle, include_memory: bool) -> Self {
+        let (regs_data, shadow_stack_entries, exception_code, exception_value, icount) =
+            Self::cpu_state_from_vm(vm);
+        let memory_regions = if include_memory {
+            Self::collect_memory_regions(vm)
+        } else {
+            Vec::new()
+        };
 
         SerializableVmState {
             regs_data,
@@ -2879,44 +2871,13 @@ pub extern "C" fn icicle_serialize_vm_state(
         }
     };
     
-    // Get the VM state
-    let vm_state = SerializableVmState::from_vm(vm);
-    
-    // If we don't want to include memory, create a copy without memory regions
-    let serialized_data = if include_memory {
-        // Determine whether to compress and at what level based on log_level
-        // For simplicity: if log_level > 2, enable compression with level = log_level - 2
-        let use_compression = log_level > 2;
-        let compression_level = log_level - 2;
-        
-        match vm_state.serialize_with_options(use_compression, compression_level) {
-            Ok(data) => data,
-            Err(_) => {
-                return -1;
-            }
-        }
-    } else {
-        // Create a copy without memory regions
-        let cpu_only_state = SerializableVmState {
-            regs_data: vm_state.regs_data,
-            shadow_stack_entries: vm_state.shadow_stack_entries,
-            exception_code: vm_state.exception_code,
-            exception_value: vm_state.exception_value,
-            icount: vm_state.icount,
-            memory_regions: Vec::new(),
-            version: vm_state.version,
-        };
-        
-        // For CPU-only, use compression if log_level > 2
-        let use_compression = log_level > 2;
-        let compression_level = log_level - 2;
-        
-        match cpu_only_state.serialize_with_options(use_compression, compression_level) {
-            Ok(data) => data,
-            Err(_) => {
-                return -1;
-            }
-        }
+    let use_compression = log_level > 2;
+    let compression_level = log_level - 2;
+    let vm_state = SerializableVmState::from_vm(vm, include_memory);
+
+    let serialized_data = match vm_state.serialize_with_options(use_compression, compression_level) {
+        Ok(data) => data,
+        Err(_) => return -1,
     };
     
     // Write to file
@@ -3012,20 +2973,8 @@ pub extern "C" fn icicle_get_serialized_size(vm_ptr: *mut Icicle) -> usize {
     
     let vm = unsafe { &mut *vm_ptr };
     
-    // Create serializable state (CPU only for compatibility)
-    let vm_state = SerializableVmState::from_vm(vm);
-    let cpu_only_state = SerializableVmState {
-        regs_data: vm_state.regs_data,
-        shadow_stack_entries: vm_state.shadow_stack_entries,
-        exception_code: vm_state.exception_code,
-        exception_value: vm_state.exception_value,
-        icount: vm_state.icount,
-        memory_regions: Vec::new(),
-        version: vm_state.version,
-    };
-    
-    // Serialize to get size
-    match cpu_only_state.serialize() {
+    let vm = unsafe { &mut *vm_ptr };
+    match SerializableVmState::from_vm(vm, false).serialize() {
         Ok(data) => data.len(),
         Err(_) => 0,
     }
@@ -3037,14 +2986,8 @@ pub extern "C" fn icicle_get_vm_serialized_size(vm_ptr: *mut Icicle) -> usize {
     if vm_ptr.is_null() {
         return 0;
     }
-    
     let vm = unsafe { &mut *vm_ptr };
-    
-    // Create full serializable state
-    let vm_state = SerializableVmState::from_vm(vm);
-    
-    // Serialize to get size
-    match vm_state.serialize() {
+    match SerializableVmState::from_vm(vm, true).serialize() {
         Ok(data) => data.len(),
         Err(_) => 0,
     }
