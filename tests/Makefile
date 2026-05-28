@@ -16,8 +16,7 @@ endif
 # archs.cpp links against keystone; only build it if keystone is available.
 ARCHS_KEYSTONE_LIB = -lkeystone
 
-test_prog.bin: test_prog.asm
-	nasm -f bin -o $@ $<
+.DEFAULT_GOAL := tests
 
 tests: test_prog.bin
 	cc $(CFLAGS) tests.c $(HEADER_ARG) $(ICICLE_ARGS_DEBUG) $(CC_ARGS) -o tests-debug
@@ -73,6 +72,9 @@ run-all: tests tests-release
 	./hook-tests-release
 	./snapshot-tests-release
 	echo "Executed both."
+
+test_prog.bin: test_prog.asm
+	nasm -f bin -o $@ $<
 
 clean:
 	$(RM) ./tests-debug
