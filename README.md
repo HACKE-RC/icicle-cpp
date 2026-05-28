@@ -44,13 +44,42 @@ The wrapper is a Rust `staticlib` crate exposing `#[no_mangle] pub extern "C"` f
 
 - **Snapshot/restore**: `CpuSnapshot` and `VmSnapshot` are `#[repr(C)]` structs with opaque heap-allocated fields. Save allocates, restore copies back into the live CPU/VM, and free drops each allocation.
 
-## Linking
+## CMake integration
 
-Link with `-licicle` and include `icicle.h`:
+Add icicle-cpp as a subdirectory or `ExternalProject` and link against it:
 
 ```cmake
+# Option A: add_subdirectory — a CMakeLists.txt is provided in the repo root
+add_subdirectory(vendor/icicle-cpp)
 target_link_libraries(your_target PRIVATE icicle)
-target_include_directories(your_target PRIVATE path/to/icicle-cpp)
+
+# Option B: ExternalProject (cross-platform, cross-compile friendly)
+include(ExternalProject)
+
+set(ICICLE_PREFIX "${CMAKE_CURRENT_BINARY_DIR}/icicle-cpp")
+
+ExternalProject_Add(icicle-cpp
+    GIT_REPOSITORY  https://github.com/HACKE-RC/icicle-cpp
+    GIT_TAG         master
+    PREFIX          "${ICICLE_PREFIX}"
+    CONFIGURE_COMMAND ""
+    BUILD_COMMAND   cargo build --release --manifest-path src/Cargo.toml
+    BUILD_IN_SOURCE 1
+    INSTALL_COMMAND ""
+    BUILD_BYPRODUCTS "${ICICLE_PREFIX}/src/icicle-cpp/src/target/release/${CMAKE_STATIC_LIBRARY_PREFIX}icicle${CMAKE_STATIC_LIBRARY_SUFFIX}"
+)
+
+add_library(icicle STATIC IMPORTED)
+set_target_properties(icicle PROPERTIES
+    IMPORTED_LOCATION "${ICICLE_PREFIX}/src/icicle-cpp/src/target/release/${CMAKE_STATIC_LIBRARY_PREFIX}icicle${CMAKE_STATIC_LIBRARY_SUFFIX}"
+    INTERFACE_INCLUDE_DIRECTORIES "${ICICLE_PREFIX}/src/icicle-cpp"
+)
+add_dependencies(icicle icicle-cpp)
+
+target_link_libraries(your_target PRIVATE icicle)
 ```
 
-See `icicle.h` for the full API surface.
+On Windows (MSVC), also link system libraries:
+```cmake
+target_link_libraries(your_target PRIVATE ws2_32.lib Userenv.lib ntdll.lib Bcrypt.lib)
+```
