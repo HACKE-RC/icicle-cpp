@@ -1,7 +1,10 @@
 HEADER_ARG = -I../
-ICICLE_ARGS_DEBUG = -L../src/target/debug -l:libicicle.a -lkeystone
+ICICLE_ARGS_DEBUG = -L../src/target/debug -l:libicicle.a
 ICICLE_ARGS_RELEASE = -L../src/target/release -l:libicicle.a
-CC_ARGS = -lm
+CC_ARGS = -lm -lpthread -ldl
+CFLAGS = -Wall -Wextra -Wno-unused-parameter
+CXXFLAGS = $(CFLAGS) -std=c++17
+
 OS := $(shell uname 2>/dev/null || echo Windows)
 
 ifeq ($(OS), Windows)
@@ -10,22 +13,27 @@ else
     RM = rm -f
 endif
 
+# archs.cpp links against keystone; only build it if keystone is available.
+ARCHS_KEYSTONE_LIB = -lkeystone
+
 tests:
-	g++ mapping_test.cpp $(HEADER_ARG) $(ICICLE_ARGS_DEBUG) $(CC_ARGS) -o mapping-test-debug
-	cc tests.c $(HEADER_ARG) $(ICICLE_ARGS_DEBUG) $(CC_ARGS) -o tests-debug
-	cc serialization_test.c $(HEADER_ARG) $(ICICLE_ARGS_DEBUG) $(CC_ARGS) -o serialization-test-debug
-	cc compression_test.c $(HEADER_ARG) $(ICICLE_ARGS_DEBUG) $(CC_ARGS) -o compression-test-debug
-	cc debug_features.c $(HEADER_ARG) $(ICICLE_ARGS_DEBUG) $(CC_ARGS) -o features-debug
-	cc hook_tests.c $(HEADER_ARG) $(ICICLE_ARGS_DEBUG) $(CC_ARGS) -o hook-tests-debug
-	cc snapshot_tests.c $(HEADER_ARG) $(ICICLE_ARGS_DEBUG) $(CC_ARGS) -o snapshot-tests-debug
-# 	g++ archs.cpp $(HEADER_ARG) $(ICICLE_ARGS_DEBUG) $(CC_ARGS) -o archs-tests-debug
+	cc $(CFLAGS) tests.c $(HEADER_ARG) $(ICICLE_ARGS_DEBUG) $(CC_ARGS) -o tests-debug
+	cc $(CFLAGS) serialization_test.c $(HEADER_ARG) $(ICICLE_ARGS_DEBUG) $(CC_ARGS) -o serialization-test-debug
+	cc $(CFLAGS) compression_test.c $(HEADER_ARG) $(ICICLE_ARGS_DEBUG) $(CC_ARGS) -o compression-test-debug
+	cc $(CFLAGS) debug_features.c $(HEADER_ARG) $(ICICLE_ARGS_DEBUG) $(CC_ARGS) -o features-debug
+	cc $(CFLAGS) hook_tests.c $(HEADER_ARG) $(ICICLE_ARGS_DEBUG) $(CC_ARGS) -o hook-tests-debug
+	cc $(CFLAGS) snapshot_tests.c $(HEADER_ARG) $(ICICLE_ARGS_DEBUG) $(CC_ARGS) -o snapshot-tests-debug
+
+# Optional: build archs.cpp explicitly when keystone is installed.
+archs:
+	g++ $(CXXFLAGS) archs.cpp $(HEADER_ARG) $(ICICLE_ARGS_DEBUG) $(CC_ARGS) $(ARCHS_KEYSTONE_LIB) -o archs-tests-debug
 
 tests-release:
-	cc tests.c $(HEADER_ARG) $(ICICLE_ARGS_RELEASE) $(CC_ARGS) -o tests-release
-	cc serialization_test.c $(HEADER_ARG) $(ICICLE_ARGS_RELEASE) $(CC_ARGS) -o serialization-test-release
-	cc compression_test.c $(HEADER_ARG) $(ICICLE_ARGS_RELEASE) $(CC_ARGS) -o compression-test-release
-	cc hook_tests.c $(HEADER_ARG) $(ICICLE_ARGS_RELEASE) $(CC_ARGS) -o hook-tests-release
-	cc snapshot_tests.c $(HEADER_ARG) $(ICICLE_ARGS_RELEASE) $(CC_ARGS) -o snapshot-tests-release
+	cc $(CFLAGS) tests.c $(HEADER_ARG) $(ICICLE_ARGS_RELEASE) $(CC_ARGS) -o tests-release
+	cc $(CFLAGS) serialization_test.c $(HEADER_ARG) $(ICICLE_ARGS_RELEASE) $(CC_ARGS) -o serialization-test-release
+	cc $(CFLAGS) compression_test.c $(HEADER_ARG) $(ICICLE_ARGS_RELEASE) $(CC_ARGS) -o compression-test-release
+	cc $(CFLAGS) hook_tests.c $(HEADER_ARG) $(ICICLE_ARGS_RELEASE) $(CC_ARGS) -o hook-tests-release
+	cc $(CFLAGS) snapshot_tests.c $(HEADER_ARG) $(ICICLE_ARGS_RELEASE) $(CC_ARGS) -o snapshot-tests-release
 
 all: tests tests-release
 
