@@ -16,7 +16,10 @@ endif
 # archs.cpp links against keystone; only build it if keystone is available.
 ARCHS_KEYSTONE_LIB = -lkeystone
 
-tests:
+test_prog.bin: test_prog.asm
+	nasm -f bin -o $@ $<
+
+tests: test_prog.bin
 	cc $(CFLAGS) tests.c $(HEADER_ARG) $(ICICLE_ARGS_DEBUG) $(CC_ARGS) -o tests-debug
 	cc $(CFLAGS) serialization_test.c $(HEADER_ARG) $(ICICLE_ARGS_DEBUG) $(CC_ARGS) -o serialization-test-debug
 	cc $(CFLAGS) compression_test.c $(HEADER_ARG) $(ICICLE_ARGS_DEBUG) $(CC_ARGS) -o compression-test-debug

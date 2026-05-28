@@ -166,6 +166,7 @@ void test_env_debug_instrumentation() {
 }
 
 int main() {
+    setenv("GHIDRA_SRC", "../ghidra", 0);
     test_env_debug_instrumentation();
     printf("\nTest completed.\n");
     return 0;

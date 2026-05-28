@@ -227,6 +227,7 @@ int test_error_handling() {
 }
 
 int main() {
+    setenv("GHIDRA_SRC", "../ghidra", 0);
     int result = test_serialization();
     if (result == 0) {
         result = test_error_handling();

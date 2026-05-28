@@ -148,6 +148,7 @@ const char* status_to_string(int status) {
 }
 
 int main() {
+    setenv("GHIDRA_SRC", "../ghidra", 0);
     printf("\n=== HOOK TESTING ===\n\n");
 
     Icicle* vm = icicle_new("x86_64", 1, 1, 0, 1, 0, 1, 0, 0);
