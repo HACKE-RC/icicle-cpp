@@ -1,74 +1,82 @@
 # Icicle
+
 [Icicle](https://github.com/icicle-emu/icicle-emu) is an experimental fuzzing-specific, multi-architecture emulation framework.
 
 ## C/C++ Bindings
-This project aims to provide C/C++ bindings for the icicle emulator. I'd also like to write full on documentation on this soon.
 
-## Usage
-Using these bindings is as simple as compiling the static library using cargo and then including it in your project using your compiler or make, cmake, etc.
-If you just want the library and the header file, you can download it from the [releases page](https://github.com/HACKE-RC/icicle-cpp/tags)
+This project provides C/C++ bindings for the icicle emulator as a static library with a single-header C API (`icicle.h`).
 
-### Compilation
-Getting the static library is as simple as
+## Building
+
+### Prerequisites
+
+- Rust toolchain (install via [rustup](https://rustup.rs))
+- NASM (for assembling the test program)
+- The ghidra submodule (required for SLEIGH processor definitions)
+
 ```sh
-git clone https://github.com/HACKE-RC/icicle-cpp
+git clone --recurse-submodules https://github.com/HACKE-RC/icicle-cpp
 cd icicle-cpp
 cd src
-cargo build     # you can use cargo build --release if you want the release build
+cargo build --release
 ```
 
-The static library will now be built in `icicle-cpp/src/target/<build_type>/libicicle.a`. Here, <build_type> will be `debug` if you do not use the `--release` flag with cargo
-and `release` if you do.
+The static library will be at `src/target/release/libicicle.a`.
 
-# Comprehensive Icicle Hook Testing
+### Convenience script
 
-This project provides a robust test for the Icicle emulator's hook functionality. The test demonstrates all three types of hooks:
-1. Execution hooks - triggered when a block of code executes
-2. Syscall hooks - triggered when the program makes a system call
-3. Violation hooks - triggered when a memory access violation occurs
-
-## Test Program Details
-
-The test program:
-
-1. Creates an x86_64 virtual machine
-2. Maps various memory regions with different permissions
-3. Loads a comprehensive test program that:
-   - Executes various x86_64 instructions
-   - Performs memory reads/writes
-   - Attempts to write to read-only memory (triggers violation hook)
-   - Makes a syscall (triggers syscall hook)
-4. Registers all three types of hooks with detailed callbacks
-5. Runs the emulation with hooks enabled
-6. Tests hook removal by removing the syscall hook and verifying it no longer triggers
-
-## Expected Output
-
-The test program provides detailed output about:
-- Hook registration
-- Hook triggering with full context (addresses, permissions, etc.)
-- Statistics on how many times each hook was triggered
-- Verification that hook removal works
-
-## Building and Running
-
-To build and run the test:
-
-```bash
-# Compile the test program
-make -f hook_test_Makefile
-
-# Run the test
-./hook_test
+```sh
+./build_and_test.sh
 ```
 
-## Hook Implementations
+This builds the Rust library and runs all C test binaries (`tests-debug`, `hook-tests-debug`, `snapshot-tests-debug`, `serialization-test-debug`, `compression-test-debug`, `features-debug`).
 
-The Rust implementation includes:
+## Running Tests
 
-1. `icicle_add_violation_hook`: Adds a memory violation hook
-2. `icicle_add_syscall_hook`: Adds a syscall interception hook
-3. `icicle_add_execution_hook`: Adds a basic block execution hook
-4. `icicle_remove_hook`: Removes a previously registered hook
+```sh
+cd tests
+make          # builds all test binaries
+make run      # runs the debug suite
+```
 
-Each hook has detailed callback functions that report what's happening during emulation.
+Each test binary can also be run standalone:
+```sh
+./tests-debug              # core functionality (registers, memory, disassembly, etc.)
+./hook-tests-debug         # violation, syscall, execution, mem read/write hooks
+./snapshot-tests-debug     # CPU/VM snapshot and restore
+./serialization-test-debug # state serialization + zstd compression
+./features-debug           # environment variable debug instrumentation
+```
+
+## Linking
+
+The library is a standard C static library. Link with `-licicle` and include `icicle.h`:
+
+```cmake
+# CMake example
+target_link_libraries(your_target PRIVATE icicle)
+target_include_directories(your_target PRIVATE path/to/icicle-cpp)
+```
+
+```makefile
+# Makefile example
+LDFLAGS += -L/path/to/icicle-cpp/src/target/release -licicle
+CFLAGS  += -I/path/to/icicle-cpp
+```
+
+## Hook API
+
+The following hook types are supported:
+
+| Hook type | Registration | Removal |
+|-----------|-------------|---------|
+| Memory violation | `icicle_add_violation_hook` | `icicle_remove_hook` |
+| Syscall interception | `icicle_add_syscall_hook` | `icicle_remove_hook` |
+| Block execution | `icicle_add_execution_hook` | `icicle_remove_execution_hook` |
+| Memory read (range) | `icicle_add_mem_read_hook` | `icicle_remove_mem_read_hook` |
+| Memory write (range) | `icicle_add_mem_write_hook` | `icicle_remove_mem_write_hook` |
+| Debug write logging | `icicle_debug_log_write` | `icicle_remove_mem_write_hook` |
+| Debug register logging | `icicle_debug_log_regs` | `icicle_remove_execution_hook` |
+| Coverage instrumentation | `icicle_set_coverage_mode` | — (reconfigure to disable) |
+
+See `icicle.h` for full function signatures and documentation.
